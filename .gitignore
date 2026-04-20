@@ -30,8 +30,8 @@ output_*/
 data/
 raw_data_files/
 
-# Streamlit
-.streamlit/
+# Streamlit (keep .streamlit/config.toml for deployment)
+# .streamlit/secrets.toml
 
 # OS
 .DS_Store
