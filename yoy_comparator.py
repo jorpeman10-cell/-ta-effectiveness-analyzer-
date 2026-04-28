@@ -16,6 +16,7 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 
 from multi_company import IndustryAggregator, IndustryReportGenerator
+from report_parser import PriorYearData
 
 
 def _safe(val):
@@ -583,6 +584,380 @@ class YoYComparator:
                 '模块': '人均成本', '维度': func,
                 f'{self.prev_year}': _fmt_num(prev, 2),
                 f'{self.curr_year}': _fmt_num(curr, 2),
+                '变化': delta, '趋势': arrow,
+            })
+
+        return pd.DataFrame(rows)
+
+
+class YoYReportComparator:
+    """
+    Year-over-Year 对比引擎 (报告模式)
+    
+    对比方式: 当年调研数据 vs 上年度发布报告中的P50数据
+    这样可以确保上年度数据与发布报告一致，避免原始调研数据被trim后的偏差
+    
+    输入:
+      - curr_agg: 当年 IndustryAggregator (从问卷解析)
+      - prev_data: 上年度 PriorYearData (从发布报告PDF解析)
+    """
+
+    def __init__(self, curr_agg: IndustryAggregator, prev_data: PriorYearData,
+                 curr_year: str = "2025", prev_year: str = "2024"):
+        self.curr_agg = curr_agg
+        self.prev_data = prev_data
+        self.curr_year = curr_year
+        self.prev_year = prev_year
+
+        self.curr_df = curr_agg.get_dataframe()
+        self.curr_summary = curr_agg.get_summary()
+
+    def generate_yoy_report(self) -> str:
+        """生成年度对比报告 (当年调研 vs 上年度发布报告)"""
+        lines = []
+        lines.append(f"# 医疗健康行业 TA效能 {self.prev_year} vs {self.curr_year} 年度对比报告")
+        lines.append(f"\n**对比方式**: {self.curr_year}年调研数据 vs {self.prev_year}年发布报告数据")
+        lines.append(f"\n**数据来源**:")
+        lines.append(f"- {self.curr_year}年: 调研问卷 ({self.curr_summary['公司数']}家公司)")
+        lines.append(f"- {self.prev_year}年: 发布报告 ({self.prev_data.source_file})")
+        lines.append(f"\n生成时间: {datetime.datetime.now().strftime('%Y年%m月%d日')}")
+
+        # 1. 招聘周期趋势
+        lines.append(f"\n---\n## 1. 招聘周期趋势\n")
+        lines.extend(self._section_tth())
+
+        # 2. 招聘成本趋势
+        lines.append(f"\n---\n## 2. 招聘成本趋势\n")
+        lines.extend(self._section_cost())
+
+        # 3. 渠道分布趋势
+        lines.append(f"\n---\n## 3. 渠道分布趋势\n")
+        lines.extend(self._section_channel())
+
+        # 4. TA生产率趋势
+        lines.append(f"\n---\n## 4. TA生产率趋势\n")
+        lines.extend(self._section_productivity())
+
+        # 5. 商业/研发细分趋势
+        lines.append(f"\n---\n## 5. 细分职能趋势\n")
+        lines.extend(self._section_detail())
+
+        # 6. 成本结构趋势
+        lines.append(f"\n---\n## 6. 成本结构趋势\n")
+        lines.extend(self._section_cost_structure())
+
+        # 7. 关键发现
+        lines.append(f"\n---\n## 7. 关键发现\n")
+        lines.extend(self._section_findings())
+
+        # 8. 数据审核
+        lines.append(f"\n---\n## 8. 数据提取审核\n")
+        lines.extend(self._section_audit())
+
+        return "\n".join(lines)
+
+    def _section_tth(self):
+        """招聘周期对比"""
+        lines = []
+        lines.append(f"### 各职能招聘周期 P50 对比（天）\n")
+        lines.append(f"| 职能 | {self.prev_year}(报告) | {self.curr_year}(调研) | 变化 | 趋势 |")
+        lines.append(f"|------|------|------|------|------|")
+
+        funcs = ['早期研发', '临床开发', '商业', '生产及供应链', '职能']
+        for func in funcs:
+            prev = self.prev_data.func_tth.get(func, np.nan)
+            curr = self._curr_tth(func)
+            delta, arrow = _delta(curr, prev)
+            lines.append(f"| {func} | {_fmt_num(prev)} | {_fmt_num(curr)} | {delta} | {arrow} |")
+
+        return lines
+
+    def _section_cost(self):
+        """人均招聘成本对比"""
+        lines = []
+        lines.append(f"### 各职能人均招聘成本 P50 对比（万元）\n")
+        lines.append(f"| 职能 | {self.prev_year}(报告) | {self.curr_year}(调研) | 变化 | 趋势 |")
+        lines.append(f"|------|------|------|------|------|")
+
+        for func in ['早期研发', '临床开发', '商业', '生产及供应链', '职能']:
+            prev = self.prev_data.func_cost_per_hire.get(func, np.nan)
+            curr = self._curr_cost(func)
+            delta, arrow = _delta(curr, prev)
+            lines.append(f"| {func} | {_fmt_num(prev, 2)} | {_fmt_num(curr, 2)} | {delta} | {arrow} |")
+
+        return lines
+
+    def _section_channel(self):
+        """渠道分布对比"""
+        lines = []
+        lines.append(f"### 渠道分布 P50 对比\n")
+        lines.append(f"| 渠道 | {self.prev_year}(报告) | {self.curr_year}(调研) | 变化 | 趋势 |")
+        lines.append(f"|------|------|------|------|------|")
+
+        # 当年渠道计算
+        curr_ch = self._curr_channel_distribution()
+
+        for ch_label, prev_key, curr_key in [
+            ('外部渠道', '外部渠道', ('整体', '外部渠道')),
+            ('内推占外部', '内推占外部', ('整体', '内推')),
+        ]:
+            prev = self.prev_data.channel_distribution.get(prev_key, np.nan)
+            curr = curr_ch.get(curr_key, np.nan) if isinstance(curr_key, tuple) else np.nan
+            delta, arrow = _delta_pct(curr, prev)
+            lines.append(f"| {ch_label} | {_fmt_pct(prev)} | {_fmt_pct(curr)} | {delta} | {arrow} |")
+
+        # HR直招, 猎头 etc from curr calculation
+        for ch in ['HR直招', '猎头']:
+            curr = curr_ch.get(('整体', ch), np.nan)
+            lines.append(f"| {ch} | N/A | {_fmt_pct(curr)} | - | - |")
+
+        return lines
+
+    def _section_productivity(self):
+        """TA生产率对比"""
+        lines = []
+        lines.append(f"### TA人均招聘量 P50 对比\n")
+        lines.append(f"| 分组 | {self.prev_year}(报告) | {self.curr_year}(调研) | 变化 | 趋势 |")
+        lines.append(f"|------|------|------|------|------|")
+
+        curr_prod = self._curr_productivity()
+        for group, label in [('整体', '整体'), ('A', 'A类'), ('B', 'B类')]:
+            prev = self.prev_data.ta_productivity.get(group, np.nan)
+            curr = curr_prod.get(group, np.nan)
+            delta, arrow = _delta(curr, prev)
+            lines.append(f"| {label} | {_fmt_num(prev)} | {_fmt_num(curr)} | {delta} | {arrow} |")
+
+        return lines
+
+    def _section_detail(self):
+        """细分职能对比"""
+        lines = []
+
+        # 商业细分
+        if self.prev_data.commercial_detail:
+            lines.append(f"### 商业二级职能招聘周期 P50 对比（天）\n")
+            lines.append(f"| 二级职能 | {self.prev_year}(报告) | {self.curr_year}(调研) | 变化 | 趋势 |")
+            lines.append(f"|----------|------|------|------|------|")
+
+            curr_comm = self.curr_df[(self.curr_df['层级'] == '商业细分') & (self.curr_df['职级'] == '整体')]
+            all_funcs = sorted(
+                set(self.prev_data.commercial_detail.keys()) |
+                set(curr_comm['职能'].unique() if not curr_comm.empty else [])
+            )
+
+            for func in all_funcs:
+                prev = self.prev_data.commercial_detail.get(func, {}).get('招聘周期', np.nan)
+                curr_tth = pd.to_numeric(
+                    curr_comm[curr_comm['职能'] == func]['招聘周期_天'], errors='coerce'
+                ).dropna()
+                curr = curr_tth.median() if len(curr_tth) > 0 else np.nan
+                delta, arrow = _delta(curr, prev)
+                lines.append(f"| {func} | {_fmt_num(prev)} | {_fmt_num(curr)} | {delta} | {arrow} |")
+
+        return lines
+
+    def _section_cost_structure(self):
+        """成本结构对比"""
+        lines = []
+        if self.prev_data.cost_structure:
+            lines.append(f"### 渠道成本结构 P50 对比\n")
+            lines.append(f"| 指标 | {self.prev_year}(报告) | {self.curr_year}(调研) | 变化 | 趋势 |")
+            lines.append(f"|------|------|------|------|------|")
+
+            curr_struct = self._curr_cost_structure()
+            for key in ['猎头费占比']:
+                prev = self.prev_data.cost_structure.get(key, np.nan)
+                curr = curr_struct.get(key, np.nan)
+                delta, arrow = _delta_pct(curr, prev)
+                lines.append(f"| {key} | {_fmt_pct(prev)} | {_fmt_pct(curr)} | {delta} | {arrow} |")
+
+        return lines
+
+    def _section_findings(self):
+        """关键发现"""
+        lines = []
+        findings = []
+
+        # 招聘周期变化
+        for func in ['商业', '临床开发', '早期研发', '生产及供应链', '职能']:
+            prev = self.prev_data.func_tth.get(func, np.nan)
+            curr = self._curr_tth(func)
+            if pd.notna(prev) and pd.notna(curr) and prev > 0:
+                change = (curr - prev) / prev
+                if abs(change) > 0.1:
+                    direction = "延长" if change > 0 else "缩短"
+                    findings.append(
+                        f"**{func}招聘周期{direction}**: 从{prev:.0f}天{direction}至{curr:.0f}天 ({change:+.1%})"
+                    )
+
+        # 成本变化
+        for func in ['商业', '临床开发', '早期研发']:
+            prev = self.prev_data.func_cost_per_hire.get(func, np.nan)
+            curr = self._curr_cost(func)
+            if pd.notna(prev) and pd.notna(curr) and prev > 0:
+                change = (curr - prev) / prev
+                if abs(change) > 0.15:
+                    direction = "上升" if change > 0 else "下降"
+                    findings.append(
+                        f"**{func}人均成本{direction}**: 从{prev:.2f}万{direction}至{curr:.2f}万 ({change:+.1%})"
+                    )
+
+        # TA生产率
+        curr_prod = self._curr_productivity()
+        for group, label in [('整体', '整体')]:
+            prev = self.prev_data.ta_productivity.get(group, np.nan)
+            curr = curr_prod.get(group, np.nan)
+            if pd.notna(prev) and pd.notna(curr) and prev > 0:
+                change = (curr - prev) / prev
+                if abs(change) > 0.1:
+                    direction = "提升" if change > 0 else "下降"
+                    findings.append(
+                        f"**TA生产率{direction}**: 从{prev:.1f}{direction}至{curr:.1f} ({change:+.1%})"
+                    )
+
+        if findings:
+            for i, f in enumerate(findings, 1):
+                lines.append(f"{i}. {f}")
+        else:
+            lines.append("*两年数据对比未发现显著变化趋势*")
+
+        return lines
+
+    def _section_audit(self):
+        """数据提取审核"""
+        lines = []
+        lines.append(f"以下是从上年度发布报告中提取的原始数据点，请核实准确性：\n")
+        lines.append(f"| # | 提取内容 |")
+        lines.append(f"|---|---------|")
+        for i, ext in enumerate(self.prev_data.raw_extractions, 1):
+            lines.append(f"| {i} | {ext} |")
+        return lines
+
+    # ==================== 当年数据计算辅助 ====================
+
+    def _curr_tth(self, func):
+        """当年某职能招聘周期P50"""
+        func_df = self.curr_df[(self.curr_df['层级'] == '一级职能') & (self.curr_df['职级'] == '整体')]
+        fd = func_df[func_df['职能'] == func]
+        tth = pd.to_numeric(fd['招聘周期_天'], errors='coerce').dropna()
+        return tth.median() if len(tth) > 0 else np.nan
+
+    def _curr_cost(self, func):
+        """当年某职能人均招聘成本P50"""
+        func_df = self.curr_df[(self.curr_df['层级'] == '一级职能') & (self.curr_df['职级'] == '整体')]
+        fd = func_df[func_df['职能'] == func]
+        costs = []
+        for _, row in fd.iterrows():
+            cost = pd.to_numeric(row.get('外部渠道成本_万'), errors='coerce')
+            total = pd.to_numeric(row.get('招聘总量'), errors='coerce')
+            if pd.notna(cost) and pd.notna(total) and total > 0:
+                costs.append(cost / total)
+        return np.median(costs) if costs else np.nan
+
+    def _curr_channel_distribution(self):
+        """当年渠道分布"""
+        overall = self.curr_df[self.curr_df['层级'] == '公司整体']
+        result = {}
+        channel_data = []
+        for _, row in overall.iterrows():
+            total = _safe(row.get('招聘总量', 0))
+            if total <= 0:
+                continue
+            hr = _safe(row.get('HR直招', 0)) / total
+            hh = _safe(row.get('猎头_人', 0)) / total
+            ref = _safe(row.get('内推_人', 0)) / total
+            transfer = _safe(row.get('内部转岗', 0)) / total
+            rpo = _safe(row.get('RPO_人', 0)) / total
+            apply_d = _safe(row.get('主动投递', 0)) / total
+            campus = _safe(row.get('校招', 0)) / total
+            ext = hh + rpo + ref + apply_d + campus
+            channel_data.append({
+                '规模': row['规模'],
+                'HR直招': hr, '外部渠道': ext, '内部渠道': transfer,
+                '猎头': hh, '内推': ref,
+            })
+        if channel_data:
+            chdf = pd.DataFrame(channel_data)
+            for ch in ['HR直招', '外部渠道', '内部渠道', '猎头', '内推']:
+                result[('整体', ch)] = chdf[ch].median()
+                for scale in ['A', 'B']:
+                    sub = chdf[chdf['规模'] == scale]
+                    result[(scale, ch)] = sub[ch].median() if len(sub) > 0 else np.nan
+        return result
+
+    def _curr_productivity(self):
+        """当年TA生产率"""
+        ta_df = self.curr_df[self.curr_df['层级'] == 'TA配置']
+        overall = self.curr_df[self.curr_df['层级'] == '公司整体']
+        result = {}
+        prod_data = []
+        for co in self.curr_agg.companies:
+            co_ta = ta_df[(ta_df['公司'] == co) & (ta_df['职能'].str.contains('公司整体', na=False))]
+            co_hire = overall[overall['公司'] == co]
+            if not co_ta.empty and not co_hire.empty:
+                ta_fte = pd.to_numeric(co_ta.iloc[0].get('TA_FTE'), errors='coerce')
+                hire = co_hire.iloc[0].get('招聘总量', 0)
+                if pd.notna(ta_fte) and ta_fte > 0 and hire > 0:
+                    prod_data.append({'规模': co_hire.iloc[0]['规模'], '人均招聘量': hire / ta_fte})
+        if prod_data:
+            pdf = pd.DataFrame(prod_data)
+            result['整体'] = pdf['人均招聘量'].median()
+            for scale in ['A', 'B']:
+                sub = pdf[pdf['规模'] == scale]
+                result[scale] = sub['人均招聘量'].median() if len(sub) > 0 else np.nan
+        return result
+
+    def _curr_cost_structure(self):
+        """当年渠道成本结构"""
+        overall = self.curr_df[self.curr_df['层级'] == '公司整体']
+        result = {}
+        ratios = []
+        for _, row in overall.iterrows():
+            tc = pd.to_numeric(row.get('外部渠道成本_万'), errors='coerce')
+            hh = pd.to_numeric(row.get('猎头费_万'), errors='coerce')
+            if pd.notna(tc) and tc > 0 and pd.notna(hh):
+                ratios.append(hh / tc)
+        result['猎头费占比'] = np.median(ratios) if ratios else np.nan
+        return result
+
+    def export_comparison_table(self) -> pd.DataFrame:
+        """导出年度对比表"""
+        rows = []
+
+        # 招聘周期
+        for func in ['早期研发', '临床开发', '商业', '生产及供应链', '职能']:
+            prev = self.prev_data.func_tth.get(func, np.nan)
+            curr = self._curr_tth(func)
+            delta, arrow = _delta(curr, prev)
+            rows.append({
+                '模块': '招聘周期', '维度': func,
+                f'{self.prev_year}(报告)': _fmt_num(prev),
+                f'{self.curr_year}(调研)': _fmt_num(curr),
+                '变化': delta, '趋势': arrow,
+            })
+
+        # 成本
+        for func in ['早期研发', '临床开发', '商业', '生产及供应链', '职能']:
+            prev = self.prev_data.func_cost_per_hire.get(func, np.nan)
+            curr = self._curr_cost(func)
+            delta, arrow = _delta(curr, prev)
+            rows.append({
+                '模块': '人均成本', '维度': func,
+                f'{self.prev_year}(报告)': _fmt_num(prev, 2),
+                f'{self.curr_year}(调研)': _fmt_num(curr, 2),
+                '变化': delta, '趋势': arrow,
+            })
+
+        # TA生产率
+        curr_prod = self._curr_productivity()
+        for group, label in [('整体', '整体'), ('A', 'A类'), ('B', 'B类')]:
+            prev = self.prev_data.ta_productivity.get(group, np.nan)
+            curr = curr_prod.get(group, np.nan)
+            delta, arrow = _delta(curr, prev)
+            rows.append({
+                '模块': 'TA生产率', '维度': label,
+                f'{self.prev_year}(报告)': _fmt_num(prev),
+                f'{self.curr_year}(调研)': _fmt_num(curr),
                 '变化': delta, '趋势': arrow,
             })
 
