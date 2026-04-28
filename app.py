@@ -18,6 +18,7 @@ from multi_company import (
 )
 from data_validator import DataValidator, validate_and_clean, generate_validation_report, ValidationResult
 from wiki.knowledge_base import KnowledgeBase, KnowledgeEntry
+from yoy_comparator import YoYComparator
 
 st.set_page_config(page_title="TA效能分析工具", page_icon="📊", layout="wide")
 
@@ -38,20 +39,213 @@ def card(label, value):
 with st.sidebar:
     st.markdown("## 📊 TA效能分析工具")
     st.markdown("---")
-    mode = st.radio("分析模式", ["🏢 单公司分析", "🏭 行业报告（多公司）"], index=1)
+    mode = st.radio("分析模式", ["🏢 单公司分析", "🏭 行业报告（多公司）", "📈 年度对比分析"], index=1)
     st.markdown("---")
     st.markdown("### 📋 使用步骤")
-    if "行业" in mode:
+    if "年度对比" in mode:
+        st.markdown("1. 上传本年度问卷\n2. 上传上年度问卷\n3. AI自动比对分析\n4. 生成趋势报告\n5. 下载结果")
+    elif "行业" in mode:
         st.markdown("1. 上传多家公司问卷\n2. 系统批量解析\n3. 生成行业P50报告\n4. 下载结果")
     else:
         st.markdown("1. 上传单家问卷\n2. 自动解析数据\n3. 查看分析报告\n4. 下载结果")
     st.markdown("---")
-    st.caption("v2.0 · 支持20家公司 · 26个分析维度")
+    st.caption("v2.0 · 支持20家公司 · 26个分析维度 · 年度对比")
 
 # ==================== 主页面 ====================
 st.markdown("# 📊 TA效能报告 - 自动化分析工具")
 
-if "行业" in mode:
+if "年度对比" in mode:
+    # ==================== 年度对比分析模式 ====================
+    st.markdown("### 📈 年度对比分析 — 上传两年数据，生成趋势报告")
+    st.markdown("分别上传**本年度**和**上年度**的调研问卷，系统将自动比对所有维度指标变化趋势。")
+
+    col_curr, col_prev = st.columns(2)
+    with col_curr:
+        st.markdown("#### 📂 本年度数据")
+        curr_year = st.text_input("本年度", value="2024", key="curr_year")
+        curr_files = st.file_uploader(
+            f"上传 {curr_year} 年问卷",
+            type=['xlsx', 'xls'], accept_multiple_files=True, key="curr_files"
+        )
+        if curr_files:
+            st.success(f"已选择 {len(curr_files)} 个文件")
+
+    with col_prev:
+        st.markdown("#### 📂 上年度数据")
+        prev_year = st.text_input("上年度", value="2023", key="prev_year")
+        prev_files = st.file_uploader(
+            f"上传 {prev_year} 年问卷",
+            type=['xlsx', 'xls'], accept_multiple_files=True, key="prev_files"
+        )
+        if prev_files:
+            st.success(f"已选择 {len(prev_files)} 个文件")
+
+    if curr_files and prev_files:
+        if st.button("🚀 开始年度对比分析", type="primary", use_container_width=True):
+            progress = st.progress(0, text="准备中...")
+
+            def _ingest_batch(files, label):
+                """批量摄入一批问卷文件"""
+                agg = IndustryAggregator()
+                raw_list = []
+                errs = []
+                for i, f in enumerate(files):
+                    progress.progress(
+                        (i + 1) / (len(files) * 2 + 4),
+                        text=f"📥 摄入{label} ({i+1}/{len(files)}): {f.name}"
+                    )
+                    try:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
+                            tmp.write(f.getvalue())
+                            tmp_path = tmp.name
+                        raw = ingest_company(tmp_path)
+                        raw_list.append(raw)
+                        os.unlink(tmp_path)
+                    except Exception as e:
+                        errs.append(f"{f.name}: {e}")
+                        try: os.unlink(tmp_path)
+                        except: pass
+                # Validate and add
+                cleaned, _, _ = validate_and_clean(raw_list)
+                for data in cleaned:
+                    agg.add_company(data)
+                return agg, errs
+
+            # Phase 1: 摄入本年度
+            curr_agg, curr_errs = _ingest_batch(curr_files, f"{curr_year}年")
+
+            # Phase 2: 摄入上年度
+            prev_agg, prev_errs = _ingest_batch(prev_files, f"{prev_year}年")
+
+            # Phase 3: 生成本年度行业报告（保留）
+            progress.progress(0.7, text="📊 生成本年度行业报告...")
+            curr_gen = IndustryReportGenerator(curr_agg)
+            curr_report = curr_gen.generate_full_report()
+
+            # Phase 4: 生成年度对比报告
+            progress.progress(0.85, text="📈 生成年度对比趋势报告...")
+            comparator = YoYComparator(curr_agg, prev_agg,
+                                       curr_year=curr_year, prev_year=prev_year)
+            yoy_report = comparator.generate_yoy_report()
+            yoy_table = comparator.export_comparison_table()
+
+            progress.progress(1.0, text="✅ 年度对比分析完成!")
+
+            st.session_state['yoy_curr_agg'] = curr_agg
+            st.session_state['yoy_prev_agg'] = prev_agg
+            st.session_state['yoy_curr_report'] = curr_report
+            st.session_state['yoy_report'] = yoy_report
+            st.session_state['yoy_table'] = yoy_table
+            st.session_state['yoy_comparator'] = comparator
+            st.session_state['yoy_curr_year'] = curr_year
+            st.session_state['yoy_prev_year'] = prev_year
+            all_errs = curr_errs + prev_errs
+            if all_errs:
+                st.session_state['yoy_errors'] = all_errs
+
+    # 显示年度对比结果
+    if 'yoy_comparator' in st.session_state:
+        comparator = st.session_state['yoy_comparator']
+        curr_agg = st.session_state['yoy_curr_agg']
+        prev_agg = st.session_state['yoy_prev_agg']
+        curr_report = st.session_state['yoy_curr_report']
+        yoy_report = st.session_state['yoy_report']
+        yoy_table = st.session_state['yoy_table']
+        cy = st.session_state['yoy_curr_year']
+        py = st.session_state['yoy_prev_year']
+
+        if 'yoy_errors' in st.session_state:
+            with st.expander("⚠️ 处理警告", expanded=False):
+                for e in st.session_state['yoy_errors']:
+                    st.warning(e)
+
+        st.markdown("---")
+
+        # 概览卡片
+        curr_s = curr_agg.get_summary()
+        prev_s = prev_agg.get_summary()
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: card(f"{cy} 公司数", f"{curr_s['公司数']}家")
+        with c2: card(f"{py} 公司数", f"{prev_s['公司数']}家")
+        with c3:
+            curr_df = curr_agg.get_dataframe()
+            curr_ov = curr_df[curr_df['层级'] == '公司整体']
+            card(f"{cy} 总招聘量", f"{curr_ov['招聘总量'].sum():.0f}人" if not curr_ov.empty else "N/A")
+        with c4:
+            prev_df = prev_agg.get_dataframe()
+            prev_ov = prev_df[prev_df['层级'] == '公司整体']
+            card(f"{py} 总招聘量", f"{prev_ov['招聘总量'].sum():.0f}人" if not prev_ov.empty else "N/A")
+
+        # Tab页
+        tab_yoy, tab_curr, tab_detail, tab_full = st.tabs([
+            f"📈 {py} vs {cy} 趋势对比",
+            f"📊 {cy} 行业报告",
+            "🔬 维度明细对比",
+            "📄 完整对比报告"
+        ])
+
+        with tab_yoy:
+            st.markdown(f"### {py} vs {cy} 关键指标变化一览")
+
+            # 按模块分组显示
+            for module in ['招聘量占比', '招聘渠道', '招聘周期', '人均成本']:
+                sub = yoy_table[yoy_table['模块'] == module]
+                if not sub.empty:
+                    st.markdown(f"#### {module}")
+                    st.dataframe(sub.drop(columns=['模块']), use_container_width=True, hide_index=True)
+
+        with tab_curr:
+            st.markdown(curr_report)
+
+        with tab_detail:
+            st.markdown("### 按维度筛选对比")
+            modules = yoy_table['模块'].unique().tolist()
+            sel_module = st.selectbox("选择模块", modules)
+            filtered = yoy_table[yoy_table['模块'] == sel_module]
+            st.dataframe(filtered.drop(columns=['模块']), use_container_width=True, hide_index=True)
+
+            # 趋势箭头汇总
+            st.markdown("### 趋势汇总")
+            up_count = len(yoy_table[yoy_table['趋势'] == '↑'])
+            down_count = len(yoy_table[yoy_table['趋势'] == '↓'])
+            flat_count = len(yoy_table[yoy_table['趋势'] == '→'])
+            na_count = len(yoy_table[yoy_table['趋势'] == ''])
+            tc1, tc2, tc3, tc4 = st.columns(4)
+            with tc1: card("↑ 上升", f"{up_count}项")
+            with tc2: card("↓ 下降", f"{down_count}项")
+            with tc3: card("→ 持平", f"{flat_count}项")
+            with tc4: card("N/A", f"{na_count}项")
+
+        with tab_full:
+            st.markdown(yoy_report)
+
+        # 下载区
+        st.markdown("---")
+        st.markdown("### 📥 下载结果")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.download_button(f"📈 下载年度对比报告", data=yoy_report,
+                               file_name=f"TA效能_{py}_vs_{cy}_年度对比报告.md",
+                               mime="text/markdown", use_container_width=True)
+        with c2:
+            st.download_button(f"📊 下载{cy}行业报告", data=curr_report,
+                               file_name=f"行业TA效能分析报告_{cy}.md",
+                               mime="text/markdown", use_container_width=True)
+        with c3:
+            yoy_csv = yoy_table.to_csv(index=False, encoding='utf-8-sig')
+            st.download_button("📊 下载对比数据 (CSV)", data=yoy_csv,
+                               file_name=f"年度对比数据_{py}_vs_{cy}.csv",
+                               mime="text/csv", use_container_width=True)
+
+    elif not (curr_files and prev_files):
+        st.markdown("---")
+        c1, c2, c3 = st.columns(3)
+        with c1: st.markdown("### 📂 Step 1\n分别上传两年的问卷数据")
+        with c2: st.markdown("### 🤖 Step 2\nAI自动比对全维度指标")
+        with c3: st.markdown("### 📈 Step 3\n生成趋势报告，量化变化")
+        st.info("👆 请在上方分别上传本年度和上年度的调研问卷文件")
+
+elif "行业" in mode:
     # ==================== 多公司行业报告模式 ====================
     st.markdown("### 上传多家公司调研问卷，生成行业级TA效能分析报告")
 
