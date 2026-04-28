@@ -22,9 +22,9 @@ for f in files:
     try:
         raw = ingest_company(f)
         name = agg.add_company(raw)
-        print(f"  ✅ {name} ({os.path.basename(f)})")
+        print(f"  [OK] {name} ({os.path.basename(f)})")
     except Exception as e:
-        print(f"  ❌ {os.path.basename(f)}: {e}")
+        print(f"  [ERR] {os.path.basename(f)}: {e}")
 
 print("\n" + "=" * 80)
 print("运行数据审核...")

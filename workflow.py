@@ -136,7 +136,7 @@ class WorkflowOrchestrator:
         self.raw_datasets = self.ingestor.ingest_questionnaire_set()
         
         if not self.raw_datasets:
-            print("  ⚠️ 未找到任何数据文件，尝试从主目录摄入...")
+            print("  [WARN] 未找到任何数据文件，尝试从主目录摄入...")
             datasets = self.ingestor.ingest_directory(self.data_dir)
             for ds in datasets:
                 self.raw_datasets[ds.source_name] = ds
@@ -155,7 +155,7 @@ class WorkflowOrchestrator:
                 safe_key = key.replace('/', '_').replace('\\', '_')
                 self._save_text(f'01_column_mapping_{safe_key}_{sheet_name}.md', report)
 
-        print(f"  ✅ 已摄入 {len(self.raw_datasets)} 个数据集")
+        print(f"  [OK] 已摄入 {len(self.raw_datasets)} 个数据集")
 
     def _step_compile(self):
         """Step 2: 编译为知识库"""
@@ -180,7 +180,7 @@ class WorkflowOrchestrator:
         if errors:
             self._save_json('02_compile_errors.json', errors)
 
-        print(f"  ✅ 知识库已编译: {len(self.kb.entries)} 条知识条目")
+        print(f"  [OK] 知识库已编译: {len(self.kb.entries)} 条知识条目")
 
     def _step_pivot(self):
         """Step 3: 指标透视分析"""
@@ -197,7 +197,7 @@ class WorkflowOrchestrator:
         highlights = self.pivot.get_all_highlights()
         self._save_json('03_highlights.json', highlights)
 
-        print(f"  ✅ 透视分析完成: {len(self.pivot.results)} 个维度")
+        print(f"  [OK] 透视分析完成: {len(self.pivot.results)} 个维度")
 
     def _step_report(self):
         """Step 4: 生成报告"""
@@ -213,7 +213,7 @@ class WorkflowOrchestrator:
         structured = self.writer.export_structured_data()
         self._save_json('04_structured_report.json', structured)
 
-        print(f"  ✅ 报告已生成")
+        print(f"  [OK] 报告已生成")
 
     def _step_validate(self):
         """Step 5: 验证自查"""

@@ -124,7 +124,7 @@ def ingest_beigene(filepath: str) -> dict:
     except Exception as e:
         print(f"  [WARN] 问卷解析失败: {e}")
 
-    print(f"\n  ✅ 摄入完成: {len(results)} 个数据模块")
+    print(f"\n  [OK] 摄入完成: {len(results)} 个数据模块")
     return results
 
 
@@ -564,7 +564,7 @@ def compile_to_wiki(raw_data: dict) -> KnowledgeBase:
         print(f"  [OK] TA人员配置: {len(ta_df)} 条")
 
     stats = kb.get_statistics()
-    print(f"\n  ✅ 编译完成: {stats['total_entries']} 条知识条目")
+    print(f"\n  [OK] 编译完成: {stats['total_entries']} 条知识条目")
     return kb
 
 
@@ -643,7 +643,7 @@ def generate_report(kb: KnowledgeBase, company: str, output_dir: str):
     report_path = os.path.join(output_dir, f'{company}_分析报告.md')
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write(report_text)
-    print(f"\n  📄 报告已保存: {report_path}")
+    print(f"\n  [FILE] 报告已保存: {report_path}")
 
     return report_text
 
@@ -659,9 +659,9 @@ def validate_data(kb: KnowledgeBase, company: str, output_dir: str):
     # 1. 检查知识库条目数
     total = len(kb.entries)
     if total >= 10:
-        checks.append(('✅', '知识库条目数', f'{total} 条，数据充足'))
+        checks.append(('[OK]', '知识库条目数', f'{total} 条，数据充足'))
     else:
-        checks.append(('⚠️', '知识库条目数', f'{total} 条，数据可能不足'))
+        checks.append(('[WARN]', '知识库条目数', f'{total} 条，数据可能不足'))
 
     # 2. 检查公司整体数据
     overview = kb.get_entry(f'{company}.overview')
@@ -669,9 +669,9 @@ def validate_data(kb: KnowledgeBase, company: str, output_dir: str):
         v = overview.metric_value
         total_hire = v.get('招聘总量')
         if pd.notna(total_hire) and total_hire > 0:
-            checks.append(('✅', '公司整体招聘总量', f'{total_hire:.0f}人'))
+            checks.append(('[OK]', '公司整体招聘总量', f'{total_hire:.0f}人'))
         else:
-            checks.append(('❌', '公司整体招聘总量', '数据缺失'))
+            checks.append(('[ERR]', '公司整体招聘总量', '数据缺失'))
 
         # 验证渠道人数之和
         hr = v.get('HR直招', 0) or 0
@@ -682,24 +682,24 @@ def validate_data(kb: KnowledgeBase, company: str, output_dir: str):
         if total_hire and total_hire > 0:
             ratio = channel_sum / total_hire
             if 0.8 <= ratio <= 1.2:
-                checks.append(('✅', '渠道人数一致性', f'渠道合计{channel_sum:.0f} vs 总量{total_hire:.0f} (比值{ratio:.2f})'))
+                checks.append(('[OK]', '渠道人数一致性', f'渠道合计{channel_sum:.0f} vs 总量{total_hire:.0f} (比值{ratio:.2f})'))
             else:
-                checks.append(('⚠️', '渠道人数一致性', f'渠道合计{channel_sum:.0f} vs 总量{total_hire:.0f} (比值{ratio:.2f})'))
+                checks.append(('[WARN]', '渠道人数一致性', f'渠道合计{channel_sum:.0f} vs 总量{total_hire:.0f} (比值{ratio:.2f})'))
     else:
-        checks.append(('❌', '公司整体数据', '未找到'))
+        checks.append(('[ERR]', '公司整体数据', '未找到'))
 
     # 3. 检查职能数据
     func_entries = kb.query_by_module('职能招聘数据')
     if func_entries:
-        checks.append(('✅', '职能数据', f'{len(func_entries)} 个职能'))
+        checks.append(('[OK]', '职能数据', f'{len(func_entries)} 个职能'))
     else:
-        checks.append(('⚠️', '职能数据', '缺失'))
+        checks.append(('[WARN]', '职能数据', '缺失'))
 
     # 4. 检查研发/商业细分
     rd_entries = kb.query_by_module('研发细分')
     comm_entries = kb.query_by_module('商业细分')
-    checks.append(('✅' if rd_entries else '⚠️', '研发细分', f'{len(rd_entries)} 个子职能'))
-    checks.append(('✅' if comm_entries else '⚠️', '商业细分', f'{len(comm_entries)} 个子职能'))
+    checks.append(('[OK]' if rd_entries else '[WARN]', '研发细分', f'{len(rd_entries)} 个子职能'))
+    checks.append(('[OK]' if comm_entries else '[WARN]', '商业细分', f'{len(comm_entries)} 个子职能'))
 
     # 输出
     lines = ["# 数据验证报告", ""]

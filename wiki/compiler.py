@@ -50,10 +50,10 @@ class DataCompiler:
 
         # 汇总
         stats = self.kb.get_statistics()
-        print(f"\n✅ 编译完成: {stats['total_entries']} 条知识条目")
+        print(f"\n[OK] 编译完成: {stats['total_entries']} 条知识条目")
         print(f"   模块: {', '.join(stats['modules'])}")
         if self._compile_errors:
-            print(f"   ⚠️ {len(self._compile_errors)} 个编译警告")
+            print(f"   [WARN] {len(self._compile_errors)} 个编译警告")
 
         return self.kb
 

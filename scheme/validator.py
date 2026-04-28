@@ -102,9 +102,9 @@ class Validator:
         self._check_sample_size()
 
         print(f"\n验证完成: {self.report.overall_status}")
-        print(f"  ✅ {self.report.pass_count} 通过")
-        print(f"  ⚠️ {self.report.warn_count} 警告")
-        print(f"  ❌ {self.report.fail_count} 失败")
+        print(f"  [OK] {self.report.pass_count} 通过")
+        print(f"  [WARN] {self.report.warn_count} 警告")
+        print(f"  [ERR] {self.report.fail_count} 失败")
 
         return self.report
 
