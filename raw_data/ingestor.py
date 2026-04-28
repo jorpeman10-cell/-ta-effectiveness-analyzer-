@@ -13,6 +13,81 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 
+# ============================================================
+# 公司规模真值表 - 覆盖汇总表中的错误分类
+# A类: ≥1500人; B类: <1500人
+# ============================================================
+KNOWN_COMPANY_SCALE = {
+    # A类公司
+    '辉致': 'A', 'Viatris': 'A', '晖致': 'A',
+    '辉瑞': 'A', 'Pfizer': 'A',
+    '科赴': 'A', 'Kenvue': 'A',
+    '诺华': 'A', 'Novartis': 'A',
+    '卫材': 'A', 'Eisai': 'A',
+    '信达': 'A', 'Innovent': 'A',
+    '罗氏': 'A', 'Roche': 'A',
+    '百济神州': 'A', 'BeiGene': 'A', 'BeOne': 'A',
+    '默沙东': 'A', 'MSD': 'A',
+    '赛诺菲': 'A', 'Sanofi': 'A', 'SA': 'A',
+    '默克雪兰诺': 'A', 'Merck': 'A', '默克': 'A',
+    'BMS': 'A', '百时美施贵宝': 'A',
+    '吉利德': 'A', 'Gilead': 'A', 'GE': 'A',  # GE=6900人
+    # B类公司
+    '迪哲': 'B', 'Dizal': 'B',
+    '雅培': 'B', 'Abbott': 'B',
+    '参天': 'B', 'Santen': 'B',
+    '欧加隆': 'B', 'Organon': 'B',
+    '艾伯维': 'B', 'AbbVie': 'B', 'ABV': 'B',
+    'SMPC': 'B', 'MPCN': 'B',
+    '丸红': 'B',
+    '逸华': 'B', '逸华制药': 'B',
+}
+
+
+def fix_company_scale(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    修正汇总表中公司规模分类的错误值。
+    使用 KNOWN_COMPANY_SCALE 真值表覆盖 '公司规模' 列。
+    
+    Args:
+        df: 包含 '所属公司' 和 '公司规模' 列的DataFrame
+    Returns:
+        修正后的DataFrame
+    """
+    company_col = None
+    scale_col = None
+    
+    for c in df.columns:
+        if '所属公司' in str(c) or '公司名称' in str(c):
+            company_col = c
+        if '公司规模' in str(c) and '分类' not in str(c):
+            scale_col = c
+    
+    if company_col is None or scale_col is None:
+        return df  # 没有相关列，不处理
+    
+    fix_count = 0
+    for idx, row in df.iterrows():
+        company_name = str(row[company_col]).strip()
+        old_scale = str(row[scale_col]).strip()
+        
+        # 在真值表中查找匹配
+        new_scale = None
+        for key, cls in KNOWN_COMPANY_SCALE.items():
+            if key in company_name or company_name in key:
+                new_scale = cls
+                break
+        
+        if new_scale and new_scale != old_scale:
+            df.at[idx, scale_col] = new_scale
+            fix_count += 1
+    
+    if fix_count > 0:
+        print(f"  [FIX] 修正了 {fix_count} 行公司规模分类")
+    
+    return df
+
+
 class RawDataset:
     """原始数据集的统一表示"""
 
@@ -179,6 +254,9 @@ class FileIngestor:
                 valid_ratio = converted.notna().sum() / max(df[col].notna().sum(), 1)
                 if valid_ratio > 0.8:
                     df[col] = converted
+
+        # 修正公司规模分类（使用真值表覆盖汇总表中的错误值）
+        df = fix_company_scale(df)
 
         return df
 
