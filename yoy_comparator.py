@@ -698,18 +698,16 @@ class YoYReportComparator:
         curr_ch = self._curr_channel_distribution()
 
         for ch_label, prev_key, curr_key in [
+            ('HR直招', 'HR直招', ('整体', 'HR直招')),
             ('外部渠道', '外部渠道', ('整体', '外部渠道')),
-            ('内推占外部', '内推占外部', ('整体', '内推')),
+            ('内部渠道', '内部渠道', ('整体', '内部渠道')),
+            ('猎头(占外部)', '猎头', ('整体', '猎头')),
+            ('内推(占外部)', '内推占外部', ('整体', '内推')),
         ]:
             prev = self.prev_data.channel_distribution.get(prev_key, np.nan)
             curr = curr_ch.get(curr_key, np.nan) if isinstance(curr_key, tuple) else np.nan
             delta, arrow = _delta_pct(curr, prev)
             lines.append(f"| {ch_label} | {_fmt_pct(prev)} | {_fmt_pct(curr)} | {delta} | {arrow} |")
-
-        # HR直招, 猎头 etc from curr calculation
-        for ch in ['HR直招', '猎头']:
-            curr = curr_ch.get(('整体', ch), np.nan)
-            lines.append(f"| {ch} | N/A | {_fmt_pct(curr)} | - | - |")
 
         return lines
 
@@ -948,6 +946,25 @@ class YoYReportComparator:
                 '变化': delta, '趋势': arrow,
             })
 
+        # 渠道分布
+        curr_ch = self._curr_channel_distribution()
+        for ch_label, prev_key, curr_key in [
+            ('HR直招', 'HR直招', ('整体', 'HR直招')),
+            ('外部渠道', '外部渠道', ('整体', '外部渠道')),
+            ('内部渠道', '内部渠道', ('整体', '内部渠道')),
+            ('猎头(占外部)', '猎头', ('整体', '猎头')),
+            ('内推(占外部)', '内推占外部', ('整体', '内推')),
+        ]:
+            prev = self.prev_data.channel_distribution.get(prev_key, np.nan)
+            curr = curr_ch.get(curr_key, np.nan) if isinstance(curr_key, tuple) else np.nan
+            delta, arrow = _delta_pct(curr, prev)
+            rows.append({
+                '模块': '渠道分布', '维度': ch_label,
+                f'{self.prev_year}(报告)': _fmt_pct(prev),
+                f'{self.curr_year}(调研)': _fmt_pct(curr),
+                '变化': delta, '趋势': arrow,
+            })
+
         # TA生产率
         curr_prod = self._curr_productivity()
         for group, label in [('整体', '整体'), ('A', 'A类'), ('B', 'B类')]:
@@ -958,6 +975,19 @@ class YoYReportComparator:
                 '模块': 'TA生产率', '维度': label,
                 f'{self.prev_year}(报告)': _fmt_num(prev),
                 f'{self.curr_year}(调研)': _fmt_num(curr),
+                '变化': delta, '趋势': arrow,
+            })
+
+        # 成本结构
+        curr_struct = self._curr_cost_structure()
+        for key in ['猎头费占比']:
+            prev = self.prev_data.cost_structure.get(key, np.nan)
+            curr = curr_struct.get(key, np.nan)
+            delta, arrow = _delta_pct(curr, prev)
+            rows.append({
+                '模块': '成本结构', '维度': key,
+                f'{self.prev_year}(报告)': _fmt_pct(prev),
+                f'{self.curr_year}(调研)': _fmt_pct(curr),
                 '变化': delta, '趋势': arrow,
             })
 

@@ -105,6 +105,7 @@ if "年度对比" in mode:
                 curr_agg = IndustryAggregator()
                 raw_list = []
                 curr_errs = []
+                tmp_files = []
                 for i, f in enumerate(curr_files):
                     progress.progress(
                         (i + 1) / (len(curr_files) + 4),
@@ -114,13 +115,15 @@ if "年度对比" in mode:
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
                             tmp.write(f.getvalue())
                             tmp_path = tmp.name
+                        tmp_files.append(tmp_path)
                         raw = ingest_company(tmp_path)
                         raw_list.append(raw)
-                        os.unlink(tmp_path)
                     except Exception as e:
                         curr_errs.append(f"{f.name}: {e}")
-                        try: os.unlink(tmp_path)
-                        except: pass
+                # Cleanup temp files
+                for tp in tmp_files:
+                    try: os.unlink(tp)
+                    except: pass
 
                 cleaned, _, _ = validate_and_clean(raw_list)
                 for data in cleaned:
@@ -206,6 +209,7 @@ if "年度对比" in mode:
                     agg = IndustryAggregator()
                     raw_list = []
                     errs = []
+                    tmp_paths = []
                     for i, f in enumerate(files):
                         progress.progress(
                             (i + 1) / (len(files) * 2 + 4),
@@ -215,13 +219,15 @@ if "年度对比" in mode:
                             with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
                                 tmp.write(f.getvalue())
                                 tmp_path = tmp.name
+                            tmp_paths.append(tmp_path)
                             raw = ingest_company(tmp_path)
                             raw_list.append(raw)
-                            os.unlink(tmp_path)
                         except Exception as e:
                             errs.append(f"{f.name}: {e}")
-                            try: os.unlink(tmp_path)
-                            except: pass
+                    # Cleanup temp files after all ingestion done
+                    for tp in tmp_paths:
+                        try: os.unlink(tp)
+                        except: pass
                     # Validate and add
                     cleaned, _, _ = validate_and_clean(raw_list)
                     for data in cleaned:
@@ -446,6 +452,7 @@ elif "行业" in mode:
             raw_list = []
 
             # Phase 1: 摄入到 Raw Data 池
+            tmp_paths = []
             for i, f in enumerate(uploaded_files):
                 progress.progress((i + 1) / (len(uploaded_files) + 4),
                                   text=f"📥 Raw Data 摄入 ({i+1}/{len(uploaded_files)}): {f.name}")
@@ -453,14 +460,16 @@ elif "行业" in mode:
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
                         tmp.write(f.getvalue())
                         tmp_path = tmp.name
+                    tmp_paths.append(tmp_path)
                     raw = ingest_company(tmp_path)
                     name = agg.add_company_raw(raw)
                     raw_list.append(raw)
-                    os.unlink(tmp_path)
                 except Exception as e:
                     errors.append(f"{f.name}: {str(e)}")
-                    try: os.unlink(tmp_path)
-                    except: pass
+            # Cleanup temp files after all ingestion
+            for tp in tmp_paths:
+                try: os.unlink(tp)
+                except: pass
 
             # Phase 2: 数据验证清洗
             progress.progress(0.7, text="🔍 数据验证与清洗...")

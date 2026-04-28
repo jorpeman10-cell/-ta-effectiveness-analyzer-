@@ -304,43 +304,82 @@ def _extract_tth(pages: List[str], data: PriorYearData):
 def _extract_channel_distribution(pages: List[str], data: PriorYearData):
     """提取渠道分布数据"""
     for i, page_text in enumerate(pages):
-        if '内部推荐依然是核心招聘渠道' in page_text or \
-           ('外部渠道招聘' in page_text and '62.18%' in page_text):
-            # Known data points from the text:
-            # 外部渠道: 整体62.18%, A类62.18%, B类64.01%
-            # 内推占外部渠道: 73.52%
+        if '不同招聘渠道选择' in page_text and 'HR直接招聘' in page_text and '外部渠道招聘' in page_text:
+            # Page 13 structure:
+            # "21.47% 21.47% 23.88% 62.18% 62.18% 64.01% 10.33% 10.52% 7.47%"
+            #  HR整体  HR-A   HR-B   外部整体 外部A  外部B  内部整体 内部A  内部B
+            # "14.15% 10.44% 15.24% 73.52% 67.42% 84.24%"
+            #  猎头整体 猎头A  猎头B  内推整体 内推A  内推B
 
-            # Extract percentages
-            pct_pattern = r'(\d+\.?\d*)\s*%'
-            pcts = re.findall(pct_pattern, page_text)
+            # Extract the structured channel data using the known layout pattern
+            # Pattern: "整体2024A 2024B" sections with percentages
+            pcts = re.findall(r'(\d+\.?\d*)\s*%', page_text)
+            pct_vals = [float(p) for p in pcts]
 
-            # External channel
-            ext_match = re.search(r'外部渠道招聘.*?整体\s*(\d+\.?\d*)\s*%', page_text)
-            if ext_match:
-                data.channel_distribution['外部渠道'] = float(ext_match.group(1)) / 100
-                data.raw_extractions.append(
-                    f"Page {i+1}: 外部渠道占比 = {ext_match.group(1)}%"
-                )
+            # Find the block: "21.47% 21.47% 23.88%62.18% 62.18%64.01%10.33% 10.52% 7.47%"
+            # This appears after "HR直接招聘 外部渠道招聘 内部渠道招聘"
+            # Look for the 9-value pattern: HR(整体,A,B), 外部(整体,A,B), 内部(整体,A,B)
+            main_ch_match = re.search(
+                r'(\d+\.?\d*)\s*%\s*(\d+\.?\d*)\s*%\s*(\d+\.?\d*)\s*%'  # HR
+                r'\s*(\d+\.?\d*)\s*%\s*(\d+\.?\d*)\s*%\s*(\d+\.?\d*)\s*%'  # 外部
+                r'\s*(\d+\.?\d*)\s*%\s*(\d+\.?\d*)\s*%\s*(\d+\.?\d*)\s*%',  # 内部
+                page_text
+            )
 
-            # A-class
-            a_ext_match = re.search(r'A类\s*(\d+\.?\d*)\s*%', page_text)
-            if a_ext_match:
-                data.channel_distribution_a['外部渠道'] = float(a_ext_match.group(1)) / 100
+            if main_ch_match:
+                hr_all, hr_a, hr_b = float(main_ch_match.group(1))/100, float(main_ch_match.group(2))/100, float(main_ch_match.group(3))/100
+                ext_all, ext_a, ext_b = float(main_ch_match.group(4))/100, float(main_ch_match.group(5))/100, float(main_ch_match.group(6))/100
+                int_all, int_a, int_b = float(main_ch_match.group(7))/100, float(main_ch_match.group(8))/100, float(main_ch_match.group(9))/100
 
-            # B-class
-            b_ext_match = re.search(r'B类\s*(\d+\.?\d*)\s*%', page_text)
-            if b_ext_match:
-                data.channel_distribution_b['外部渠道'] = float(b_ext_match.group(1)) / 100
+                # 但要注意：PDF text 中可能顺序是先出现外部渠道的子项(猎头/内推)，再出现主渠道
+                # 从实际输出看顺序是: 猎头(14.15,10.44,15.24) 内推(73.52,67.42,84.24) 然后 HR(21.47,21.47,23.88) 外部(62.18,62.18,64.01) 内部(10.33,10.52,7.47)
+                # 验证: 检查数值合理性
+                if hr_all + ext_all + int_all > 0.85:
+                    # This is the main channel block (HR+外部+内部≈100%)
+                    data.channel_distribution['HR直招'] = hr_all
+                    data.channel_distribution['外部渠道'] = ext_all
+                    data.channel_distribution['内部渠道'] = int_all
+                    data.channel_distribution_a['HR直招'] = hr_a
+                    data.channel_distribution_a['外部渠道'] = ext_a
+                    data.channel_distribution_a['内部渠道'] = int_a
+                    data.channel_distribution_b['HR直招'] = hr_b
+                    data.channel_distribution_b['外部渠道'] = ext_b
+                    data.channel_distribution_b['内部渠道'] = int_b
+                    data.raw_extractions.append(
+                        f"Page {i+1}: HR直招 P50 = 整体{hr_all:.2%}/A{hr_a:.2%}/B{hr_b:.2%}"
+                    )
+                    data.raw_extractions.append(
+                        f"Page {i+1}: 外部渠道 P50 = 整体{ext_all:.2%}/A{ext_a:.2%}/B{ext_b:.2%}"
+                    )
+                    data.raw_extractions.append(
+                        f"Page {i+1}: 内部渠道 P50 = 整体{int_all:.2%}/A{int_a:.2%}/B{int_b:.2%}"
+                    )
 
-            # Internal referral
-            ref_match = re.search(r'内部推荐占比.*?(\d+\.?\d*)\s*%', page_text)
-            if not ref_match:
-                ref_match = re.search(r'(\d+\.?\d*)\s*%.*?较2023年', page_text)
-            if ref_match:
-                data.channel_distribution['内推占外部'] = float(ref_match.group(1)) / 100
-                data.raw_extractions.append(
-                    f"Page {i+1}: 内推占外部渠道 = {ref_match.group(1)}%"
-                )
+            # Extract sub-channel: 猎头 and 内推 from external channel breakdown
+            # Pattern: "14.15% 10.44% 15.24%73.52% 67.42% 84.24%"
+            sub_ch_match = re.search(
+                r'(\d+\.?\d*)\s*%\s*(\d+\.?\d*)\s*%\s*(\d+\.?\d*)\s*%'  # 猎头
+                r'\s*(\d+\.?\d*)\s*%\s*(\d+\.?\d*)\s*%\s*(\d+\.?\d*)\s*%',
+                page_text
+            )
+            if sub_ch_match:
+                v1, v2, v3 = float(sub_ch_match.group(1))/100, float(sub_ch_match.group(2))/100, float(sub_ch_match.group(3))/100
+                v4, v5, v6 = float(sub_ch_match.group(4))/100, float(sub_ch_match.group(5))/100, float(sub_ch_match.group(6))/100
+                # 猎头 is smaller (10-20%), 内推 is larger (60-85%)
+                if v1 < v4:  # v1=猎头, v4=内推
+                    data.channel_distribution['猎头'] = v1
+                    data.channel_distribution_a['猎头'] = v2
+                    data.channel_distribution_b['猎头'] = v3
+                    data.channel_distribution['内推占外部'] = v4
+                    data.channel_distribution_a['内推占外部'] = v5
+                    data.channel_distribution_b['内推占外部'] = v6
+                    data.raw_extractions.append(
+                        f"Page {i+1}: 猎头(占外部) P50 = 整体{v1:.2%}/A{v2:.2%}/B{v3:.2%}"
+                    )
+                    data.raw_extractions.append(
+                        f"Page {i+1}: 内推(占外部) P50 = 整体{v4:.2%}/A{v5:.2%}/B{v6:.2%}"
+                    )
+
             break
 
 
