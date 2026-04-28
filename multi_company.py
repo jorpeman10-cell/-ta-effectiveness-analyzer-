@@ -190,30 +190,147 @@ def ingest_company(filepath: str) -> dict:
     return results
 
 
+# 已知公司规模分类（来自核查总表，作为ground truth）
+# A类: ≥1500人; B类: <1500人
+KNOWN_COMPANY_SCALE = {
+    # A类
+    '辉致': 'A', 'Viatris': 'A', '晖致': 'A',
+    '辉瑞': 'A', 'Pfizer': 'A',
+    '科赴': 'A', 'Kenvue': 'A',
+    '诺华': 'A', 'Novartis': 'A',
+    '卫材': 'A', 'Eisai': 'A',
+    '信达': 'A', 'Innovent': 'A',
+    '罗氏': 'A', 'Roche': 'A',
+    '百济神州': 'A', 'BeiGene': 'A', 'BeOne': 'A',
+    '默沙东': 'A', 'MSD': 'A',
+    '赛诺菲': 'A', 'Sanofi': 'A', 'SA': 'A',
+    '默克雪兰诺': 'A', 'Merck': 'A',
+    'BMS': 'A', '百时美施贵宝': 'A',
+    '吉利德': 'A', 'Gilead': 'A', 'GE': 'A',  # GE=6900人，A类（仅提供效能提升部分数据）
+    # B类
+    '迪哲': 'B', 'Dizal': 'B',
+    '雅培': 'B', 'Abbott': 'B',
+    '参天': 'B', 'Santen': 'B',
+    '欧加隆': 'B', 'Organon': 'B',
+    '艾伯维': 'B', 'AbbVie': 'B', 'ABV': 'B',
+    'SMPC': 'B', 'MPCN': 'B',
+}
+
+# 仅提供部分数据的公司（如只有效能提升问卷，无完整TA效率数据）
+PARTIAL_DATA_COMPANIES = {
+    'GE': '仅提供效能提升部分数据，无完整TA效率表',
+    '吉利德': '仅提供效能提升部分数据，无完整TA效率表',
+    'Gilead': '仅提供效能提升部分数据，无完整TA效率表',
+}
+
+
+def _classify_scale(scale_str, company_name=''):
+    """
+    根据人员规模字符串判断公司分类
+    A类: ≥1500人; B类: <1500人
+    
+    问卷中规模选项: '500以下', '500-1000', '1000-2000', '2000以上'
+    """
+    import re
+    
+    # 1. 先查已知公司注册表（最可靠）
+    for key, cls in KNOWN_COMPANY_SCALE.items():
+        if key in company_name or company_name in key:
+            return cls
+    
+    # 2. 解析规模字符串
+    s = str(scale_str).strip()
+    
+    # "2000以上" / "5000以上" → A
+    if '以上' in s:
+        nums = re.findall(r'\d+', s)
+        if nums and int(nums[0]) >= 1500:
+            return 'A'
+    
+    # "X-Y" 范围格式，如 "1000-2000", "500-1000"
+    range_match = re.findall(r'(\d+)\s*[-~到]\s*(\d+)', s)
+    if range_match:
+        lo, hi = int(range_match[0][0]), int(range_match[0][1])
+        # 如果下限 ≥ 1500，肯定是A
+        if lo >= 1500:
+            return 'A'
+        # 如果上限 ≤ 1500，肯定是B
+        if hi <= 1500:
+            return 'B'
+        # 1000-2000 这种跨1500的范围，默认按上限判断为A
+        # （因为大多数填1000-2000的公司实际≥1500）
+        if hi >= 2000:
+            return 'A'
+        return 'B'
+    
+    # 纯数字
+    nums = re.findall(r'\d+', s)
+    if nums:
+        max_num = max(int(n) for n in nums)
+        if max_num >= 1500:
+            return 'A'
+        return 'B'
+    
+    # 无法判断，默认B
+    return 'B'
+
+
 def _extract_company_info(df):
-    """从基本信息Sheet提取公司名称和规模"""
+    """
+    从基本信息Sheet提取公司名称和规模
+    
+    问卷固定格式:
+    - Row 3 (index 3): [1.1, 公司名称, <公司名>, ...]
+    - Row 10 (index 10): [1.7, 公司人员总体规模, <规模值>]
+    """
     company_name = '未知公司'
     scale = '未知'
     scale_class = 'B'
 
-    for i in range(min(15, len(df))):
-        row = df.iloc[i].values
-        row_str = ' '.join(str(v) for v in row if pd.notna(v))
-        if '公司名称' in row_str:
-            for v in row[2:]:
-                if pd.notna(v) and str(v).strip() and '公司名称' not in str(v):
-                    company_name = str(v).strip()
+    # 方法1: 基于固定行号提取（最可靠）
+    # Excel布局: col[0]=NaN, col[1]=编号, col[2]=标签, col[3]=值
+    if len(df) > 10:
+        # Row 3: 公司名称 → 值在col[3]
+        row3 = df.iloc[3].values
+        for v in row3[3:]:  # 从col[3]开始，跳过标签列
+            if pd.notna(v) and str(v).strip():
+                val = str(v).strip()
+                # 排除表头文字
+                if not any(k in val for k in ['Revenue', 'Number', 'Clients', 'By ']):
+                    company_name = val
                     break
-        if '公司人员' in row_str or '人员总体规模' in row_str:
-            for v in row[2:]:
-                if pd.notna(v) and str(v).strip():
-                    scale = str(v).strip()
-                    # A类: >=1500人; B类: <1500人
-                    if any(k in scale for k in ['2000', '5000', '3000', '1500', '以上']):
-                        scale_class = 'A'
-                    elif '500' in scale and '1500' not in scale:
-                        scale_class = 'B'
-                    break
+        
+        # Row 10: 公司人员总体规模 → 值在col[3]
+        row10 = df.iloc[10].values
+        for v in row10[3:]:  # 从col[3]开始，跳过标签列
+            if pd.notna(v) and str(v).strip():
+                scale = str(v).strip()
+                break
+
+    # 方法2: 关键字搜索（兜底）
+    if company_name == '未知公司' or scale == '未知':
+        for i in range(min(20, len(df))):
+            row = df.iloc[i].values
+            row_str = ' '.join(str(v) for v in row if pd.notna(v))
+            
+            if company_name == '未知公司' and '公司名称' in row_str:
+                for v in row[2:]:
+                    if pd.notna(v) and str(v).strip() and '公司名称' not in str(v):
+                        val = str(v).strip()
+                        if not any(k in val for k in ['Revenue', 'Number', 'Clients', 'By ']):
+                            company_name = val
+                            break
+            
+            if scale == '未知' and any(k in row_str for k in ['公司人员', '人员总体规模', '总体规模', '1.7']):
+                for v in row[2:]:
+                    if pd.notna(v) and str(v).strip():
+                        val = str(v).strip()
+                        if any(c.isdigit() for c in val) or '以上' in val or '以下' in val:
+                            scale = val
+                            break
+
+    # 分类
+    scale_class = _classify_scale(scale, company_name)
 
     return company_name, scale, scale_class
 
