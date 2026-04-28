@@ -712,16 +712,27 @@ class IndustryReportGenerator:
             return lines
 
         # 计算各渠道占比
+        def _safe(val):
+            """NaN-safe: np.nan or 0 返回 nan 而非 0, 这里修正"""
+            try:
+                v = float(val)
+                return v if pd.notna(v) else 0.0
+            except (TypeError, ValueError):
+                return 0.0
+
         channel_data = []
         for _, row in overall.iterrows():
-            total = row.get('招聘总量', 0) or 0
+            total = _safe(row.get('招聘总量', 0))
             if total <= 0:
                 continue
-            hr = (row.get('HR直招', 0) or 0) / total
-            hh = (row.get('猎头_人', 0) or 0) / total
-            ref = (row.get('内推_人', 0) or 0) / total
-            transfer = (row.get('内部转岗', 0) or 0) / total
-            ext = hh + (row.get('RPO_人', 0) or 0) / total + ref + (row.get('主动投递', 0) or 0) / total + (row.get('校招', 0) or 0) / total
+            hr = _safe(row.get('HR直招', 0)) / total
+            hh = _safe(row.get('猎头_人', 0)) / total
+            ref = _safe(row.get('内推_人', 0)) / total
+            transfer = _safe(row.get('内部转岗', 0)) / total
+            rpo = _safe(row.get('RPO_人', 0)) / total
+            apply_direct = _safe(row.get('主动投递', 0)) / total
+            campus = _safe(row.get('校招', 0)) / total
+            ext = hh + rpo + ref + apply_direct + campus
             channel_data.append({
                 '公司': row['公司'], '规模': row['规模'],
                 'HR直招': hr, '外部渠道': ext, '内部渠道': transfer,
@@ -944,15 +955,22 @@ class IndustryReportGenerator:
         lines = ["\n### 附录2: 招聘渠道指标\n"]
         overall = self.df[self.df['层级'] == '公司整体']
 
+        def _safe(val):
+            try:
+                v = float(val)
+                return v if pd.notna(v) else 0.0
+            except (TypeError, ValueError):
+                return 0.0
+
         ch_ratios = defaultdict(list)
         for _, row in overall.iterrows():
-            total = row.get('招聘总量', 0) or 0
+            total = _safe(row.get('招聘总量', 0))
             if total <= 0:
                 continue
-            ch_ratios['HR直招'].append((row.get('HR直招', 0) or 0) / total)
-            ch_ratios['猎头'].append((row.get('猎头_人', 0) or 0) / total)
-            ch_ratios['内推'].append((row.get('内推_人', 0) or 0) / total)
-            ch_ratios['内部转岗'].append((row.get('内部转岗', 0) or 0) / total)
+            ch_ratios['HR直招'].append(_safe(row.get('HR直招', 0)) / total)
+            ch_ratios['猎头'].append(_safe(row.get('猎头_人', 0)) / total)
+            ch_ratios['内推'].append(_safe(row.get('内推_人', 0)) / total)
+            ch_ratios['内部转岗'].append(_safe(row.get('内部转岗', 0)) / total)
 
         lines.append("#### 各招聘渠道招聘量占比")
         lines.append("| 渠道 | n | P25 | P50 | P75 | 平均 |")
