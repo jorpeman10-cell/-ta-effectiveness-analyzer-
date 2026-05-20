@@ -263,6 +263,12 @@ class YoYComparator:
         curr_ch = self._calc_channel_distribution(self.curr_df)
 
         lines.append(f"### 整体渠道分布 P50 对比\n")
+        lines.append(
+            "> 注：一级渠道是闭合构成，但下表的 P50 是分别对每个渠道的公司占比取中位数，"
+            "三个 P50 可能来自不同公司，因此不要求相加为100%，也可能出现三个P50同向变化。"
+            "如需判断结构是否整体迁移，请同时查看导出的 P25/P50/P75 核查表或同公司样本。"
+            "\n"
+        )
         lines.append(f"| 渠道 | {self.prev_year} | {self.curr_year} | 变化 | 趋势 |")
         lines.append(f"|------|------|------|------|------|")
         for ch in ['HR直招', '外部渠道', '内部渠道']:
@@ -1101,6 +1107,12 @@ class YoYReportComparator:
         """渠道分布对比"""
         lines = []
         lines.append(f"### 渠道分布 P50 对比\n")
+        lines.append(
+            "> 注：一级渠道是闭合构成，但下表的 P50 是分别对每个渠道的公司占比取中位数，"
+            "三个 P50 可能来自不同公司，因此不要求相加为100%，也可能出现三个P50同向变化。"
+            "如需判断结构是否整体迁移，请同时查看 P25/P75 或同公司样本。"
+            "\n"
+        )
         lines.append(f"| 渠道 | {self.prev_year}(报告) | {self.curr_year}(调研) | 变化 | 趋势 |")
         lines.append(f"|------|------|------|------|------|")
 

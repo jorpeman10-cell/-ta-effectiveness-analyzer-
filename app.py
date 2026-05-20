@@ -696,7 +696,7 @@ elif "行业" in mode:
             with tab2:
                 # 招聘渠道
                 st.markdown("### 一级招聘渠道分布 P50")
-                st.caption("一级渠道：HR直招、外部渠道、内部渠道；外部渠道=猎头+内推+主动投递+校招+RPO，内部渠道=内部转岗。渠道占比0值为有效值，不做trim。")
+                st.caption("一级渠道：HR直招、外部渠道、内部渠道；外部渠道=猎头+内推+主动投递+校招+RPO，内部渠道=内部转岗。渠道占比0值为有效值，不做trim。P50为各渠道分别取中位数，三项P50不要求相加为100%。")
                 ch_data = []
                 for _, row in overall.iterrows():
                     hr_n = row.get('HR直招', 0) or 0
