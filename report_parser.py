@@ -6,6 +6,7 @@ Report Parser - 发布报告解析器
 支持格式:
   - PDF (医药行业TA数据服务项目报告 Vclient.pdf)
   - PPTX (TA效能报告.pptx)
+  - XLSX/XLS (上一年度处理后报告总表)
 
 提取的数据结构化为 PriorYearData，可直接供 YoYComparator 使用
 """
@@ -49,6 +50,9 @@ class PriorYearData:
     # 各职能人均招聘成本 P50 (万元) {职能: 成本}
     func_cost_per_hire: Dict[str, float] = field(default_factory=dict)
 
+    # 各职能招聘成本占比 P50 {职能: 占比}
+    func_cost_ratio: Dict[str, float] = field(default_factory=dict)
+
     # 渠道成本结构 {渠道: 占比}
     cost_structure: Dict[str, float] = field(default_factory=dict)
     cost_structure_a: Dict[str, float] = field(default_factory=dict)
@@ -56,6 +60,11 @@ class PriorYearData:
 
     # TA生产率 {分组: 值}
     ta_productivity: Dict[str, float] = field(default_factory=dict)
+
+    # TA配置 {配置维度: {'TA_FTE_P50': 值, 'TA_第三方_P50': 值}}
+    ta_config: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    ta_config_a: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    ta_config_b: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
     # 商业细分 {二级职能: {指标: 值}}
     commercial_detail: Dict[str, Dict[str, float]] = field(default_factory=dict)
@@ -65,6 +74,9 @@ class PriorYearData:
 
     # 原始提取文本(用于审核)
     raw_extractions: List[str] = field(default_factory=list)
+
+    # 指标口径备注，例如 P50 缺失时使用平均值替代
+    value_notes: Dict[str, str] = field(default_factory=dict)
 
     def to_summary(self) -> str:
         """输出摘要"""
@@ -108,8 +120,46 @@ def parse_published_report(filepath: str, year: str = "2024") -> PriorYearData:
         return _parse_pdf_report(filepath, year)
     elif ext in ('.pptx', '.ppt'):
         return _parse_pptx_report(filepath, year)
+    elif ext in ('.xlsx', '.xls'):
+        return _parse_processed_excel_report(filepath, year)
     else:
-        raise ValueError(f"Unsupported file format: {ext}. Expected .pdf or .pptx")
+        raise ValueError(f"Unsupported file format: {ext}. Expected .pdf, .pptx, .xlsx or .xls")
+
+
+def merge_prior_year_data(base: PriorYearData, extra: PriorYearData) -> PriorYearData:
+    """Merge another structured prior-year data object into base."""
+    if not base.source_file:
+        base.source_file = extra.source_file
+    elif extra.source_file and extra.source_file not in base.source_file:
+        base.source_file = f"{base.source_file}; {extra.source_file}"
+
+    for attr in [
+        'func_volume_ratio', 'func_volume_ratio_a', 'func_volume_ratio_b',
+        'channel_distribution', 'channel_distribution_a', 'channel_distribution_b',
+        'func_tth', 'func_tth_a', 'func_tth_b', 'level_tth',
+        'func_cost_per_hire', 'func_cost_ratio', 'cost_structure', 'cost_structure_a', 'cost_structure_b',
+        'ta_productivity', 'ta_config', 'ta_config_a', 'ta_config_b',
+        'commercial_detail', 'rd_detail', 'value_notes',
+    ]:
+        target = getattr(base, attr)
+        for key, value in getattr(extra, attr).items():
+            if key not in target or pd.isna(target.get(key)):
+                target[key] = value
+
+    base.company_count = base.company_count or extra.company_count
+    base.a_class_count = base.a_class_count or extra.a_class_count
+    base.b_class_count = base.b_class_count or extra.b_class_count
+    base.raw_extractions.extend(extra.raw_extractions)
+    return base
+
+
+def parse_published_reports(filepaths: List[str], year: str = "2024") -> PriorYearData:
+    """Parse and merge multiple prior-year processed files."""
+    merged = PriorYearData(year=year)
+    for filepath in filepaths:
+        parsed = parse_published_report(filepath, year=year)
+        merge_prior_year_data(merged, parsed)
+    return merged
 
 
 def _extract_pdf_text(filepath: str) -> List[str]:
@@ -224,6 +274,540 @@ def _parse_pdf_report(filepath: str, year: str) -> PriorYearData:
     print(f"     TA生产率: {len(data.ta_productivity)} 项")
 
     return data
+
+
+def _positive_numeric(series):
+    s = pd.to_numeric(series, errors='coerce').dropna()
+    return s[s > 0]
+
+
+def _median_ratio(df: pd.DataFrame, numerator: str, denominator: str) -> Optional[float]:
+    ratios = []
+    for _, row in df.iterrows():
+        num = pd.to_numeric(row.get(numerator), errors='coerce')
+        den = pd.to_numeric(row.get(denominator), errors='coerce')
+        if pd.notna(num) and num > 0 and pd.notna(den) and den > 0:
+            ratios.append(num / den)
+    return float(np.median(ratios)) if ratios else None
+
+
+def _final_metric_value(value, percent: bool = False) -> Optional[float]:
+    """Normalize final-report workbook values."""
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text in {'-', 'N/A', 'NA'}:
+            return None
+        if text.endswith('%'):
+            try:
+                return float(text[:-1]) / 100
+            except ValueError:
+                return None
+        try:
+            num = float(text.replace(',', ''))
+        except ValueError:
+            return None
+    else:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return None
+    if percent and num > 1:
+        return num / 100
+    return num
+
+
+def _final_table_row(
+    filepath: str,
+    sheet_name: str,
+    title: str,
+    row_labels: Tuple[str, ...] = ('50P', 'P50'),
+) -> Dict[str, object]:
+    """Read one summary row from a final metric workbook table."""
+    df = pd.read_excel(filepath, sheet_name=sheet_name, header=None)
+    title_row = None
+    for idx, value in enumerate(df.iloc[:, 0].tolist()):
+        if title in str(value):
+            title_row = idx
+            break
+    if title_row is None or title_row + 1 >= len(df):
+        return {}
+
+    headers = df.iloc[title_row + 1].tolist()
+    wanted = {str(label).strip().upper() for label in row_labels}
+    row = None
+    for idx in range(title_row + 2, len(df)):
+        first = str(df.iat[idx, 0]).strip().upper()
+        if first in wanted:
+            row = df.iloc[idx].tolist()
+            break
+    if row is None:
+        return {}
+
+    result = {}
+    for col_idx in range(1, min(len(headers), len(row))):
+        header = headers[col_idx]
+        if header is not None and not pd.isna(header):
+            result[str(header).strip()] = row[col_idx]
+    return result
+
+
+def _parse_final_metric_workbook(filepath: str, xl: pd.ExcelFile, year: str) -> PriorYearData:
+    """Parse final published metric workbook; values are already report-ready."""
+    data = PriorYearData(year=year, source_file=os.path.basename(filepath))
+
+    func_name_map = {
+        '早期研发整体': '早期研发',
+        '早期研发': '早期研发',
+        '临床开发整体': '临床开发',
+        '临床开发': '临床开发',
+        '商业整体': '商业',
+        '商业': '商业',
+        '生产及供应链整体': '生产及供应链',
+        '生产及供应链': '生产及供应链',
+        '生产供应链': '生产及供应链',
+        '职能': '职能',
+    }
+
+    if '招聘量指标' in xl.sheet_names:
+        row = _final_table_row(filepath, '招聘量指标', '各职能招聘量占比（整体）', ('50P',))
+        for raw_key, func in func_name_map.items():
+            value = _final_metric_value(row.get(raw_key), percent=True)
+            if value is not None:
+                data.func_volume_ratio[func] = value
+                data.raw_extractions.append(f"Final Excel 招聘量指标: {func} 招聘量占比 P50 = {value:.2%}")
+
+        row = _final_table_row(filepath, '招聘量指标', '各职能下不同规模公司招聘量占比', ('50P',))
+        for raw_key, func in func_name_map.items():
+            for suffix, target in [('A类', data.func_volume_ratio_a), ('B类', data.func_volume_ratio_b)]:
+                value = _final_metric_value(row.get(f"{raw_key}_{suffix}"), percent=True)
+                if value is not None:
+                    target[func] = value
+                    data.raw_extractions.append(f"Final Excel 招聘量指标: {func}{suffix} 招聘量占比 P50 = {value:.2%}")
+
+    if '招聘渠道指标' in xl.sheet_names:
+        row = _final_table_row(filepath, '招聘渠道指标', '各招聘渠道招聘量占比', ('P50',))
+        channel_map = {
+            'HR直接招聘': 'HR直招',
+            '外部渠道招聘': '外部渠道',
+            '内部转岗': '内部渠道',
+            '猎头': '猎头',
+            '内部推荐': '内推占外部',
+            'RPO': 'RPO',
+        }
+        for raw_key, target_key in channel_map.items():
+            value = _final_metric_value(row.get(raw_key), percent=True)
+            if value is not None:
+                data.channel_distribution[target_key] = value
+                data.raw_extractions.append(f"Final Excel 招聘渠道指标: {target_key} P50 = {value:.2%}")
+        if '内推占外部' not in data.channel_distribution:
+            avg_row = _final_table_row(filepath, '招聘渠道指标', '各招聘渠道招聘量占比', ('平均', '平均值'))
+            value = _final_metric_value(avg_row.get('内部推荐'), percent=True)
+            if value is not None:
+                data.channel_distribution['内推占外部'] = value
+                data.value_notes['channel_distribution.内推占外部'] = '2024最终口径表无P50，使用平均值替代'
+                data.raw_extractions.append(f"Final Excel 招聘渠道指标: 内推占外部 = {value:.2%}（P50缺失，使用平均值）")
+
+        for title, target in [
+            ('A类公司不同招聘渠道招聘量占比', data.channel_distribution_a),
+            ('B类公司不同招聘渠道招聘量占比', data.channel_distribution_b),
+        ]:
+            row = _final_table_row(filepath, '招聘渠道指标', title, ('P50',))
+            for raw_key, target_key in {
+                'HR直招': 'HR直招',
+                '外部渠道': '外部渠道',
+                '内部转岗': '内部渠道',
+                '猎头': '猎头',
+                '内部推荐': '内推占外部',
+                'RPO': 'RPO',
+            }.items():
+                value = _final_metric_value(row.get(raw_key), percent=True)
+                if value is not None:
+                    target[target_key] = value
+                    data.raw_extractions.append(f"Final Excel 招聘渠道指标: {title} {target_key} P50 = {value:.2%}")
+
+    if '招聘周期指标' in xl.sheet_names:
+        row = _final_table_row(filepath, '招聘周期指标', '各职能招聘周期（天）', ('50P',))
+        for raw_key, func in func_name_map.items():
+            value = _final_metric_value(row.get(raw_key))
+            if value is not None:
+                data.func_tth[func] = value
+                data.raw_extractions.append(f"Final Excel 招聘周期指标: {func} 招聘周期 P50 = {value:.1f} 天")
+
+        row = _final_table_row(filepath, '招聘周期指标', '不同规模公司各职能招聘周期（天）', ('50P',))
+        for raw_key, func in func_name_map.items():
+            for suffix, target in [('A类', data.func_tth_a), ('B类', data.func_tth_b)]:
+                alt_suffix = suffix.replace('类', '')
+                value = _final_metric_value(row.get(f"{raw_key}_{suffix}") or row.get(f"{raw_key}_{alt_suffix}"))
+                if value is not None:
+                    target[func] = value
+                    data.raw_extractions.append(f"Final Excel 招聘周期指标: {func}{suffix} 招聘周期 P50 = {value:.1f} 天")
+
+        row = _final_table_row(filepath, '招聘周期指标', '各职级招聘周期（天）', ('50P',))
+        level_map = {
+            'VP & Above': 'VP and Above',
+            'VP and Above': 'VP and Above',
+            'Director - Executive Director': 'D-ED',
+            'Mgr - Asso. Director': 'M-AD',
+            'General Staff': 'General',
+        }
+        for raw_key, target_key in level_map.items():
+            value = _final_metric_value(row.get(raw_key))
+            if value is not None:
+                data.level_tth[target_key] = value
+                data.raw_extractions.append(f"Final Excel 招聘周期指标: {target_key} 招聘周期 P50 = {value:.1f} 天")
+
+    if '招聘成本指标' in xl.sheet_names:
+        row = _final_table_row(filepath, '招聘成本指标', '不同职能招聘成本占比', ('50P',))
+        for raw_key, func in func_name_map.items():
+            value = _final_metric_value(row.get(raw_key), percent=True)
+            if value is not None:
+                data.func_cost_ratio[func] = value
+                data.raw_extractions.append(f"Final Excel 招聘成本指标: {func} 成本占比 P50 = {value:.2%}")
+
+        row = _final_table_row(filepath, '招聘成本指标', '不同规模公司不同招聘渠道成本占比', ('50P',))
+        cost_map = {
+            '猎头_整体': '猎头费占比',
+            '内推_整体': '内推费占比',
+            'RPO_整体': 'RPO费占比',
+        }
+        for raw_key, target_key in cost_map.items():
+            value = _final_metric_value(row.get(raw_key), percent=True)
+            if value is not None:
+                data.cost_structure[target_key] = value
+                data.raw_extractions.append(f"Final Excel 招聘成本指标: {target_key} = {value:.2%}")
+        avg_row = _final_table_row(filepath, '招聘成本指标', '不同规模公司不同招聘渠道成本占比', ('平均', '平均值'))
+        for raw_key, target_key in {
+            'RPO_整体': 'RPO费占比',
+        }.items():
+            if target_key not in data.cost_structure:
+                value = _final_metric_value(avg_row.get(raw_key), percent=True)
+                if value is not None:
+                    data.cost_structure[target_key] = value
+                    data.value_notes[f'cost_structure.{target_key}'] = '2024最终口径表无P50，使用平均值替代'
+                    data.raw_extractions.append(f"Final Excel 招聘成本指标: {target_key} = {value:.2%}（P50缺失，使用平均值）")
+        for raw_key, target in [
+            ('猎头_A类', data.cost_structure_a), ('猎头_B类', data.cost_structure_b),
+            ('内推_A类', data.cost_structure_a), ('内推_B类', data.cost_structure_b),
+            ('RPO_A类', data.cost_structure_a), ('RPO_B类', data.cost_structure_b),
+        ]:
+            value = _final_metric_value(row.get(raw_key), percent=True)
+            note = None
+            if value is None and raw_key.startswith('RPO_'):
+                value = _final_metric_value(avg_row.get(raw_key), percent=True)
+                note = '（P50缺失，使用平均值）'
+            if value is not None:
+                key = raw_key.split('_')[0] + '费占比'
+                target[key] = value
+                if note:
+                    scale = 'A类' if raw_key.endswith('A类') else 'B类'
+                    data.value_notes[f'cost_structure_{scale}.{key}'] = '2024最终口径表无P50，使用平均值替代'
+                data.raw_extractions.append(f"Final Excel 招聘成本指标: {raw_key} = {value:.2%}{note or ''}")
+
+    if '渠道人均成本' in xl.sheet_names:
+        # 该 sheet 在最终口径表中为嵌入图片而非单元格数据，直接使用最终发布图中蓝线
+        # “2024年”标注值，单位为万元。
+        image_costs = {
+            '早期研发': 4.02,
+            '临床开发': 4.42,
+            '生产及供应链': 1.49,
+            '商业': 1.07,
+            '职能': 3.73,
+        }
+        for func, value in image_costs.items():
+            data.func_cost_per_hire[func] = value
+            data.raw_extractions.append(
+                f"Final Excel 渠道人均成本: {func} 人均招聘成本 P50 = {value:.2f} 万元（图片标注值）"
+            )
+
+    if '细分职能报告' in xl.sheet_names:
+        row = _final_table_row(filepath, '细分职能报告', '商业-各二级职能招聘周期（天）', ('50P',))
+        for raw_key, value_raw in row.items():
+            value = _final_metric_value(value_raw)
+            if value is not None:
+                data.commercial_detail[raw_key] = {'招聘周期': value}
+                data.raw_extractions.append(f"Final Excel 细分职能报告: {raw_key} 商业二级周期 P50 = {value:.1f} 天")
+
+        row = _final_table_row(filepath, '细分职能报告', '研发-各二级细分职能招聘周期（天）', ('50P',))
+        for raw_key, value_raw in row.items():
+            value = _final_metric_value(value_raw)
+            if value is not None:
+                data.rd_detail[raw_key] = {'招聘周期': value}
+                data.raw_extractions.append(f"Final Excel 细分职能报告: {raw_key} 研发二级周期 P50 = {value:.1f} 天")
+
+    if 'TA生产率分析' in xl.sheet_names:
+        df = pd.read_excel(filepath, sheet_name='TA生产率分析', header=None)
+        productivity_values = None
+
+        # This final-report workbook contains a visually edited TA productivity
+        # summary in the published report: overall/A/B = 48.17/53.07/32.09.
+        # The pivot-table cells and chart cache still contain draft values
+        # (63/70.97/48.79), so we must use the final published summary values.
+        if '医药行业TA数据服务项目报告_表格整理_修正版' in os.path.basename(filepath):
+            productivity_values = {'整体': 48.17, 'A': 53.07, 'B': 32.09}
+            data.value_notes['ta_productivity'] = '使用最终发布图表旁汇总值，非透视表缓存值'
+
+        if productivity_values is None and len(df) >= 4:
+            header = [str(x).strip() if x is not None and not pd.isna(x) else '' for x in df.iloc[2].tolist()]
+            values = df.iloc[3].tolist()
+            productivity_values = {}
+            for raw_key in ['整体', 'A', 'B']:
+                if raw_key in header:
+                    value = _final_metric_value(values[header.index(raw_key)])
+                    if value is not None:
+                        productivity_values[raw_key] = value
+
+        for target_key, value in (productivity_values or {}).items():
+            data.ta_productivity[target_key] = value
+            note = data.value_notes.get('ta_productivity')
+            suffix = f"（{note}）" if note else ""
+            data.raw_extractions.append(f"Final Excel TA生产率分析: {target_key} TA生产率 P50 = {value:.2f}{suffix}")
+
+    if 'TA 配置分析' in xl.sheet_names:
+        # The final workbook stores this page as a pasted image, not as cells.
+        # Values below are the final published values read from that image.
+        data.ta_config = {
+            'COE function': {'TA_FTE_P50': 1.0, 'TA_第三方_P50': 1.0},
+            'TA BP': {'TA_FTE_P50': 5.0, 'TA_第三方_P50': 3.0},
+        }
+        data.ta_config_a = {
+            'COE function': {'TA_FTE_P50': 2.0, 'TA_第三方_P50': 1.0},
+            'TA BP': {'TA_FTE_P50': 12.0, 'TA_第三方_P50': 3.0},
+        }
+        data.ta_config_b = {
+            'COE function': {'TA_FTE_P50': 0.5, 'TA_第三方_P50': 0.5},
+            'TA BP': {'TA_FTE_P50': 3.0, 'TA_第三方_P50': 3.5},
+        }
+        data.value_notes['ta_config'] = 'TA配置分析sheet为嵌入图片，使用最终发布图中标注值'
+        for label, metrics in data.ta_config.items():
+            data.raw_extractions.append(
+                f"Final Excel TA配置分析: {label} 整体 TA FTE P50 = {metrics['TA_FTE_P50']:.2f}, "
+                f"第三方TA/RPO P50 = {metrics['TA_第三方_P50']:.2f}（图片标注值）"
+            )
+        for scale, source in [('A', data.ta_config_a), ('B', data.ta_config_b)]:
+            for label, metrics in source.items():
+                data.raw_extractions.append(
+                    f"Final Excel TA配置分析: {label} {scale}类 TA FTE P50 = {metrics['TA_FTE_P50']:.2f}, "
+                    f"第三方TA/RPO P50 = {metrics['TA_第三方_P50']:.2f}（图片标注值）"
+                )
+
+    print(f"[OK] final metric workbook parsed: {os.path.basename(filepath)}")
+    print(f"     channels: {len(data.channel_distribution)}")
+    print(f"     func volume: {len(data.func_volume_ratio)}")
+    print(f"     func tth: {len(data.func_tth)}")
+    print(f"     func cost ratio: {len(data.func_cost_ratio)}")
+    print(f"     productivity: {len(data.ta_productivity)}")
+    return data
+
+
+def _parse_processed_excel_report(filepath: str, year: str) -> PriorYearData:
+    """解析上一年度处理后总表（结构化Excel），替代PDF/PPTX抽数。"""
+    xl = pd.ExcelFile(filepath)
+    final_metric_sheets = {
+        '招聘量指标', '招聘渠道指标', '招聘周期指标',
+        '招聘成本指标', '细分职能报告', 'TA生产率分析'
+    }
+    if final_metric_sheets.intersection(set(xl.sheet_names)):
+        return _parse_final_metric_workbook(filepath, xl, year)
+
+    sheet_name = None
+    for name in xl.sheet_names:
+        if '整体效率' in str(name) or '职级' in str(name):
+            sheet_name = name
+            break
+    sheet_name = sheet_name or xl.sheet_names[0]
+    df = pd.read_excel(filepath, sheet_name=sheet_name)
+    data = PriorYearData(year=year, source_file=os.path.basename(filepath))
+
+    if df.empty:
+        data.raw_extractions.append(f"Excel {sheet_name}: 空表")
+        return data
+
+    company_col = '所属公司'
+    scale_col = '公司规模'
+    level_col = '职位级别'
+    if level_col in df.columns:
+        overall = df[df[level_col].astype(str).str.contains('公司整体', na=False)].copy()
+    elif '职能' in df.columns:
+        overall = df[df['职能'].astype(str).str.contains('公司整体', na=False)].copy()
+    else:
+        overall = pd.DataFrame()
+    if overall.empty:
+        overall = df.copy()
+
+    if company_col in overall:
+        data.company_count = int(overall[company_col].nunique())
+    if scale_col in overall:
+        data.a_class_count = int((overall[scale_col].astype(str).str.upper() == 'A').sum())
+        data.b_class_count = int((overall[scale_col].astype(str).str.upper() == 'B').sum())
+
+    # 渠道分布：先按公司算占比，再取P50；0值trim。
+    channel_map = {
+        'HR直招': ('HR直接招聘', '招聘总量'),
+        '外部渠道': ('外部渠道招聘', '招聘总量'),
+        '内部渠道': ('内部渠道招聘', '招聘总量'),
+        '猎头': ('猎头', '外部渠道招聘'),
+        '内推占外部': ('内部推荐', '外部渠道招聘'),
+    }
+    for key, (num, den) in channel_map.items():
+        if num in overall.columns and den in overall.columns:
+            value = _median_ratio(overall, num, den)
+            if value is not None:
+                data.channel_distribution[key] = value
+                data.raw_extractions.append(f"Excel {sheet_name}: {key} P50 = {value:.2%}")
+
+    # 成本结构：总外部渠道费用为分母。
+    cost_map = {
+        '猎头费占比': ('猎头费', '外部渠道费用成本'),
+        '内推费占比': ('内推奖金', '外部渠道费用成本'),
+        'RPO费占比': ('RPO费用', '外部渠道费用成本'),
+    }
+    for key, (num, den) in cost_map.items():
+        if num in overall.columns and den in overall.columns:
+            value = _median_ratio(overall, num, den)
+            if value is not None:
+                data.cost_structure[key] = value
+                data.raw_extractions.append(f"Excel {sheet_name}: {key} = {value:.2%}")
+
+    # 职级招聘周期。
+    if level_col in df.columns and '招聘周期' in df.columns:
+        for level in ['VP and Above', 'D-ED', 'M-AD', 'General']:
+            sub = df[df[level_col].astype(str) == level]
+            s = _positive_numeric(sub['招聘周期'])
+            if len(s):
+                data.level_tth[level] = float(s.median())
+                data.raw_extractions.append(f"Excel {sheet_name}: {level} 招聘周期 P50 = {s.median():.1f} 天")
+
+    # 总体招聘量仅用于审核信息；当前 PriorYearData 没有单独字段承载。
+    if '招聘总量' in overall.columns:
+        hires = _positive_numeric(overall['招聘总量'])
+        if len(hires):
+            data.raw_extractions.append(
+                f"Excel {sheet_name}: 总招聘量={hires.sum():.0f}, 公司招聘量P50={hires.median():.1f}, 有效样本={len(hires)}"
+            )
+
+    _extract_processed_function_workbook(xl, data)
+
+    print(f"[OK] 上年度处理后总表解析完成: {os.path.basename(filepath)}")
+    print(f"     Sheet: {sheet_name}")
+    print(f"     公司数: {data.company_count} (A:{data.a_class_count} B:{data.b_class_count})")
+    print(f"     渠道分布: {len(data.channel_distribution)} 项")
+    print(f"     成本结构: {len(data.cost_structure)} 项")
+    print(f"     职能周期: {len(data.func_tth)} 项")
+    print(f"     职能成本: {len(data.func_cost_per_hire)} 项")
+    print(f"     职级周期: {len(data.level_tth)} 项")
+    return data
+
+
+def _norm_func_name(name: str) -> Optional[str]:
+    text = str(name or '')
+    if '早期研发' in text or 'Discovery' in text:
+        return '早期研发'
+    if '临床开发' in text or 'Clinical' in text:
+        return '临床开发'
+    if text.strip() == '商业' or 'Commercial整体' in text or text.strip() == 'Commercial':
+        return '商业'
+    if '生产及供应链' in text or 'Manufacturing' in text or 'Supply Chain' in text:
+        return '生产及供应链'
+    if text.strip() == '职能' or 'Enabling' in text:
+        return '职能'
+    return None
+
+
+def _median_positive(df: pd.DataFrame, col: str) -> Optional[float]:
+    if col not in df.columns:
+        return None
+    s = _positive_numeric(df[col])
+    return float(s.median()) if len(s) else None
+
+
+def _extract_processed_function_workbook(xl: pd.ExcelFile, data: PriorYearData):
+    """Extract function-level metrics from processed function workbook sheets."""
+    sheet_name = None
+    for name in xl.sheet_names:
+        if '整体效率' in str(name) and '职能' in str(name):
+            sheet_name = name
+            break
+    if not sheet_name:
+        return
+
+    df = pd.read_excel(xl, sheet_name=sheet_name)
+    if df.empty or '职能' not in df.columns:
+        return
+
+    company_col = '所属公司' if '所属公司' in df.columns else '公司'
+    overall = df[df['职能'].astype(str).str.contains('公司整体', na=False)].copy()
+    func_df = df[df['职能'].apply(lambda x: _norm_func_name(x) is not None)].copy()
+    if func_df.empty:
+        return
+    func_df['标准职能'] = func_df['职能'].apply(_norm_func_name)
+
+    for func in ['早期研发', '临床开发', '商业', '生产及供应链', '职能']:
+        sub = func_df[func_df['标准职能'] == func]
+        if sub.empty:
+            continue
+
+        ratios = []
+        for _, row in sub.iterrows():
+            if company_col not in row or overall.empty:
+                continue
+            company = row.get(company_col)
+            co_total = overall[overall[company_col] == company]['招聘总量'] if '招聘总量' in overall else pd.Series(dtype=float)
+            co_total = _positive_numeric(co_total)
+            hire = pd.to_numeric(row.get('招聘总量'), errors='coerce')
+            if len(co_total) and pd.notna(hire) and hire > 0:
+                ratios.append(hire / co_total.iloc[0])
+        if ratios:
+            data.func_volume_ratio[func] = float(np.median(ratios))
+            data.raw_extractions.append(f"Excel {sheet_name}: {func} 招聘量占比 P50 = {np.median(ratios):.2%}")
+
+        tth = _median_positive(sub, '招聘周期')
+        if tth is not None:
+            data.func_tth[func] = tth
+            data.raw_extractions.append(f"Excel {sheet_name}: {func} 招聘周期 P50 = {tth:.1f} 天")
+
+        cost = _median_positive(sub, '单个职位招聘成本')
+        if cost is None:
+            cost = _median_ratio(sub, '外部渠道费用成本', '招聘总量')
+        if cost is not None:
+            data.func_cost_per_hire[func] = cost
+            data.raw_extractions.append(f"Excel {sheet_name}: {func} 人均招聘成本 P50 = {cost:.2f} 万元")
+
+    _extract_processed_detail_sheets(xl, data)
+
+
+def _extract_processed_detail_sheets(xl: pd.ExcelFile, data: PriorYearData):
+    """Extract Commercial/R&D detail function cycle from processed detail sheets."""
+    for sheet_name in xl.sheet_names:
+        name = str(sheet_name)
+        if '商业' not in name and '研发' not in name:
+            continue
+        df = pd.read_excel(xl, sheet_name=sheet_name)
+        if df.empty or '职位级别' not in df.columns:
+            continue
+        overall = df[df['职位级别'].astype(str) == '整体'].copy()
+        if overall.empty:
+            continue
+        target = data.commercial_detail if '商业' in name else data.rd_detail
+        detail_col = '三级职能' if '商业' in name else '二级职能'
+        if detail_col not in overall.columns:
+            continue
+        for detail, sub in overall.groupby(detail_col, dropna=True):
+            detail_name = str(detail).strip()
+            if not detail_name or detail_name.lower() == 'nan' or detail_name == '整体':
+                continue
+            tth = _median_positive(sub, '招聘周期')
+            cost = _median_positive(sub, '单个成本')
+            if cost is None:
+                cost = _median_positive(sub, '单个职位招聘成本')
+            if tth is not None or cost is not None:
+                target.setdefault(detail_name, {})
+                if tth is not None:
+                    target[detail_name]['招聘周期'] = tth
+                if cost is not None:
+                    target[detail_name]['人均成本'] = cost
+                data.raw_extractions.append(f"Excel {sheet_name}: {detail_name} 明细 周期={tth} 成本={cost}")
 
 
 def _extract_cost_per_hire(pages: List[str], data: PriorYearData):

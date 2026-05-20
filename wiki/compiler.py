@@ -437,6 +437,10 @@ class DataCompiler:
         company_col = self._find_col(df, ['所属公司'])
         total_col = self._find_col(df, ['招聘总量'])
         cost_ext_col = self._find_col(df, ['外部渠道费用成本', '外部渠道成本'])
+        hh_count_col = self._find_col(df, ['猎头 （单位：人）', '猎头'])
+        ref_count_col = self._find_col(df, ['内部推荐 （单位：人）', '内推'])
+        rpo_count_col = self._find_col(df, ['RPO （单位：人）', 'RPO'])
+        apply_count_col = self._find_col(df, ['主动投递 （单位：人）', '主动投递'])
 
         cost_channels = {
             '猎头费': self._find_col(df, ['猎头费']),
@@ -477,10 +481,15 @@ class DataCompiler:
         ))
 
         # 各职能单个职位招聘成本
-        if total_col:
+        denominator_cols = [c for c in [hh_count_col, ref_count_col, rpo_count_col, apply_count_col] if c]
+        if denominator_cols:
+            detail['_external_cost_hires'] = detail[denominator_cols].apply(
+                lambda row: pd.to_numeric(row, errors='coerce').fillna(0).sum(),
+                axis=1,
+            )
             detail['_cost_per_hire'] = np.where(
-                detail[total_col].notna() & (detail[total_col] != 0),
-                detail[cost_ext_col] / detail[total_col],
+                detail['_external_cost_hires'].notna() & (detail['_external_cost_hires'] != 0),
+                detail[cost_ext_col] / detail['_external_cost_hires'],
                 np.nan
             )
             per_hire = detail.groupby(func_col)['_cost_per_hire'].median().reset_index()
@@ -492,7 +501,7 @@ class DataCompiler:
                 group_by=['职能'],
                 metric_name='单位招聘成本_P50',
                 metric_value=per_hire,
-                formula='各职能招聘成本/各职能FTE招聘总数 (P50)',
+                formula='各职能外部渠道费用成本/各职能（猎头+内部推荐+RPO+主动投递）的招聘总数 (P50)',
                 data_source='4.2_职能',
                 tags=['成本', '职能', '人均成本'],
             ))
@@ -508,7 +517,7 @@ class DataCompiler:
                     group_by=['职能', '公司规模'],
                     metric_name='单位招聘成本_P50',
                     metric_value=per_hire_scale,
-                    formula='各职能招聘成本/各职能FTE招聘总数 (按公司规模P50)',
+                    formula='各职能外部渠道费用成本/各职能（猎头+内部推荐+RPO+主动投递）的招聘总数 (按公司规模P50)',
                     data_source='4.2_职能',
                     tags=['成本', '职能', '公司规模', '人均成本'],
                 ))

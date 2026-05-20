@@ -319,12 +319,16 @@ class DataValidator:
 
         for _, row in df.iterrows():
             dim = str(row.get('职能', ''))
-            total = pd.to_numeric(row.get('招聘总量'), errors='coerce')
+            external_hires = 0.0
+            for col in ['猎头_人', '内推_人', 'RPO_人', '主动投递']:
+                v = pd.to_numeric(row.get(col, 0), errors='coerce')
+                if pd.notna(v):
+                    external_hires += float(v)
 
             # 成本应与招聘量正相关
             cost = pd.to_numeric(row.get('外部渠道成本_万'), errors='coerce')
-            if pd.notna(cost) and pd.notna(total) and total > 0 and cost > 0:
-                per_hire = cost / total
+            if pd.notna(cost) and external_hires > 0 and cost > 0:
+                per_hire = cost / external_hires
                 if per_hire > 50:  # 单个职位成本>50万，可能异常
                     self.issues.append(ValidationIssue(
                         company=company, sheet='main_efficiency', field='人均成本',

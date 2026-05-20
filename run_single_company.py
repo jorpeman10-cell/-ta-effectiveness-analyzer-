@@ -149,6 +149,14 @@ def _parse_main_sheet(df, company_info):
         '招聘周期_天', '外部渠道成本_万', '猎头费_万', '内推费_万', 'RPO费_万',
         'Website费_万', '其他费_万', '校招成本_万', 'EVP成本_万'
     ]
+    metric_cols = std_cols[2:]
+    metric_start_col = 2
+    header_values = df.iloc[header_row].values
+    for j, v in enumerate(header_values):
+        s = str(v)
+        if 'FTE招聘总量' in s and '新增' in s:
+            metric_start_col = j
+            break
 
     rows = []
     for i in range(header_row + 1, len(df)):
@@ -160,9 +168,12 @@ def _parse_main_sheet(df, company_info):
             continue
 
         row_data = {}
-        for j, col_name in enumerate(std_cols):
-            if j < len(row):
-                row_data[col_name] = clean_value(row[j])
+        row_data['编号'] = clean_value(row[0]) if len(row) > 0 else np.nan
+        row_data['职能'] = clean_value(row[1]) if len(row) > 1 else np.nan
+        for j, col_name in enumerate(metric_cols):
+            src_idx = metric_start_col + j
+            if src_idx < len(row):
+                row_data[col_name] = clean_value(row[src_idx])
             else:
                 row_data[col_name] = np.nan
 
@@ -174,15 +185,74 @@ def _parse_main_sheet(df, company_info):
 
     result = pd.DataFrame(rows)
 
-    # 计算招聘总量
-    if 'FTE新增' in result.columns and 'FTE替换' in result.columns:
-        result['招聘总量'] = result[['FTE新增', 'FTE替换']].sum(axis=1, min_count=1)
+    # 计算招聘总量：FTE新增 + FTE替换 + 三方员工。
+    # 渠道分布中包含RPO/三方相关招聘，因此总量需要纳入三方员工才能闭合。
+    total_cols = [c for c in ['FTE新增', 'FTE替换', '三方员工'] if c in result.columns]
+    if total_cols:
+        total_numeric = result[total_cols].apply(pd.to_numeric, errors='coerce')
+        result['招聘总量'] = total_numeric.sum(axis=1, min_count=1)
+
+    # 如果公司整体行未填写，但一级职能整体行有数据，则用一级职能加总回填。
+    # 适用于部分问卷只填写了 1.4/1.5/1.6 等职能整体行、未填写 1.1 公司整体行的情况。
+    if {'编号', '职能', '招聘总量'}.issubset(result.columns):
+        code = result['编号'].astype(str).str.strip()
+        overall_mask = result['职能'].astype(str).str.contains('公司整体', na=False)
+        func_total_mask = code.str.match(r'^1\.[2-6]$', na=False)
+        func_total = pd.to_numeric(result.loc[func_total_mask, '招聘总量'], errors='coerce').dropna()
+        if overall_mask.any() and len(func_total) and func_total.sum() > 0:
+            overall_idx = result.index[overall_mask][0]
+            overall_total = pd.to_numeric(result.at[overall_idx, '招聘总量'], errors='coerce')
+            if pd.isna(overall_total) or overall_total <= 0:
+                result.at[overall_idx, '招聘总量'] = float(func_total.sum())
+                result.at[overall_idx, '招聘总量_回填口径'] = '一级职能整体行加总'
+                for col in [
+                    'FTE新增', 'FTE替换', '三方员工', 'HR直招', '猎头_人', 'RPO_人',
+                    '内推_人', '主动投递', '校招', '内部转岗', '外部渠道成本_万',
+                    '猎头费_万', '内推费_万', 'RPO费_万'
+                ]:
+                    if col in result.columns:
+                        vals = pd.to_numeric(result.loc[func_total_mask, col], errors='coerce').dropna()
+                        if len(vals):
+                            result.at[overall_idx, col] = float(vals.sum())
+
+        # 如果一级职能整体行也没有可回填数据，再用公司整体行的各渠道招聘数量加总回填。
+        # 适用于只填写了 HR直招/猎头/RPO/内推/主动投递/校招/内部转岗、未填写 FTE新增/替换的问卷。
+        if overall_mask.any():
+            overall_idx = result.index[overall_mask][0]
+            overall_total = pd.to_numeric(result.at[overall_idx, '招聘总量'], errors='coerce')
+            if pd.isna(overall_total) or overall_total <= 0:
+                channel_cols = ['HR直招', '猎头_人', 'RPO_人', '内推_人', '主动投递', '校招', '内部转岗']
+                valid_channel_cols = [c for c in channel_cols if c in result.columns]
+                channel_vals = pd.to_numeric(result.loc[overall_idx, valid_channel_cols], errors='coerce').dropna()
+                channel_total = channel_vals.sum() if len(channel_vals) else 0
+                if channel_total > 0:
+                    result.at[overall_idx, '招聘总量'] = float(channel_total)
+                    result.at[overall_idx, '招聘总量_回填口径'] = '公司整体各渠道招聘数量加总'
 
     # 计算外部渠道招聘
     ext_cols = ['猎头_人', 'RPO_人', '内推_人', '主动投递', '校招']
     valid_ext = [c for c in ext_cols if c in result.columns]
     if valid_ext:
-        result['外部渠道招聘'] = result[valid_ext].sum(axis=1, min_count=1)
+        ext_numeric = result[valid_ext].apply(pd.to_numeric, errors='coerce')
+        result['外部渠道招聘'] = ext_numeric.sum(axis=1, min_count=1)
+
+    # 若差额正好等于三方员工，说明三方员工只进入了招聘总量、没有进入渠道明细。
+    # 这种情况下先以渠道合计作为招聘总量，保证公司内 HR直招+外部渠道+内部转岗 与总量闭合。
+    closure_cols = ['招聘总量', 'HR直招', '外部渠道招聘', '内部转岗', '三方员工']
+    if all(c in result.columns for c in closure_cols):
+        total_num = pd.to_numeric(result['招聘总量'], errors='coerce')
+        channel_num = (
+            pd.to_numeric(result['HR直招'], errors='coerce').fillna(0)
+            + pd.to_numeric(result['外部渠道招聘'], errors='coerce').fillna(0)
+            + pd.to_numeric(result['内部转岗'], errors='coerce').fillna(0)
+        )
+        third_num = pd.to_numeric(result['三方员工'], errors='coerce').fillna(0)
+        gap_num = total_num - channel_num
+        adjust_mask = total_num.gt(0) & channel_num.gt(0) & third_num.gt(0) & np.isclose(gap_num, third_num)
+        if adjust_mask.any():
+            result.loc[adjust_mask, '招聘总量_原始含三方'] = total_num[adjust_mask]
+            result.loc[adjust_mask, '招聘总量'] = channel_num[adjust_mask]
+            result.loc[adjust_mask, '招聘总量_调整口径'] = '剔除未归因到渠道的三方员工'
 
     return result
 
@@ -243,11 +313,15 @@ def _parse_rd_sheet(df, company_info):
         row_data['公司规模'] = company_info['公司规模分类']
         row_data['一级职能'] = '研发'
 
-        # 计算招聘总量
-        fte_new = row_data.get('FTE新增', np.nan)
-        fte_rep = row_data.get('FTE替换', np.nan)
-        if pd.notna(fte_new) or pd.notna(fte_rep):
-            row_data['招聘总量'] = (fte_new if pd.notna(fte_new) else 0) + (fte_rep if pd.notna(fte_rep) else 0)
+        # 计算招聘总量：FTE新增 + FTE替换 + 三方员工
+        total_parts = [
+            pd.to_numeric(row_data.get('FTE新增', np.nan), errors='coerce'),
+            pd.to_numeric(row_data.get('FTE替换', np.nan), errors='coerce'),
+            pd.to_numeric(row_data.get('三方员工', np.nan), errors='coerce'),
+        ]
+        valid_parts = [v for v in total_parts if pd.notna(v)]
+        if valid_parts:
+            row_data['招聘总量'] = sum(valid_parts)
 
         rows.append(row_data)
 
@@ -309,10 +383,15 @@ def _parse_commercial_sheet(df, company_info):
         row_data['公司规模'] = company_info['公司规模分类']
         row_data['一级职能'] = '商业'
 
-        fte_new = row_data.get('FTE新增', np.nan)
-        fte_rep = row_data.get('FTE替换', np.nan)
-        if pd.notna(fte_new) or pd.notna(fte_rep):
-            row_data['招聘总量'] = (fte_new if pd.notna(fte_new) else 0) + (fte_rep if pd.notna(fte_rep) else 0)
+        # 计算招聘总量：FTE新增 + FTE替换 + 三方员工
+        total_parts = [
+            pd.to_numeric(row_data.get('FTE新增', np.nan), errors='coerce'),
+            pd.to_numeric(row_data.get('FTE替换', np.nan), errors='coerce'),
+            pd.to_numeric(row_data.get('三方员工', np.nan), errors='coerce'),
+        ]
+        valid_parts = [v for v in total_parts if pd.notna(v)]
+        if valid_parts:
+            row_data['招聘总量'] = sum(valid_parts)
 
         rows.append(row_data)
 
@@ -325,7 +404,10 @@ def _parse_ta_config(df, company_info):
     for i in range(len(df)):
         row = df.iloc[i].values
         row_str = ' '.join(str(v) for v in row if pd.notna(v))
-        if '公司整体' in row_str or '早期研发' in row_str or '临床开发' in row_str or \
+        if '覆盖范围' in row_str:
+            continue
+        if '公司整体' in row_str or 'COE' in row_str or 'TA BP' in row_str or \
+           '早期研发' in row_str or '临床开发' in row_str or \
            '商业' in row_str or '生产' in row_str or '职能' in row_str:
             func_name = str(row[1]) if len(row) > 1 and pd.notna(row[1]) else ''
             ta_fte = clean_value(row[2]) if len(row) > 2 else np.nan
@@ -613,13 +695,22 @@ def generate_report(kb: KnowledgeBase, company: str, output_dir: str):
         tth = v.get('招聘周期_天')
         cost = v.get('外部渠道成本_万')
         if total:
-            lines.append(f"• **招聘总量**: {total:.0f}人 (新增{v.get('FTE新增', 'N/A')}人 + 替换{v.get('FTE替换', 'N/A')}人)")
+            lines.append(
+                f"• **招聘总量**: {total:.0f}人 "
+                f"(新增{v.get('FTE新增', 'N/A')}人 + 替换{v.get('FTE替换', 'N/A')}人 + 三方{v.get('三方员工', 'N/A')}人)"
+            )
         if tth:
             lines.append(f"• **整体招聘周期**: {tth:.1f}天")
         if cost:
             lines.append(f"• **外部渠道总成本**: {cost:.2f}万元")
-            if total and total > 0:
-                lines.append(f"• **人均招聘成本**: {cost/total:.2f}万元/人")
+            external_hires = sum([
+                v.get('猎头_人', 0) or 0,
+                v.get('内推_人', 0) or 0,
+                v.get('RPO_人', 0) or 0,
+                v.get('主动投递', 0) or 0,
+            ])
+            if external_hires and external_hires > 0:
+                lines.append(f"• **人均招聘成本**: {cost/external_hires:.2f}万元/人")
 
     # 渠道分析
     if overview and isinstance(overview.metric_value, dict):

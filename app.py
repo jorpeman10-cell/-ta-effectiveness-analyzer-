@@ -2,7 +2,8 @@
 TA效能报告 - LLM Wiki 自动化分析工具
 Streamlit 前端界面 - 支持单公司/多公司行业报告
 """
-import os, sys, json, tempfile, datetime
+import os, sys, json, tempfile, datetime, importlib, re
+from typing import Optional
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -14,12 +15,24 @@ from run_single_company import (
 )
 from multi_company import (
     ingest_company, IndustryAggregator, IndustryReportGenerator,
-    generate_audit_report
+    generate_audit_report, _external_cost_hire_count
 )
 from data_validator import DataValidator, validate_and_clean, generate_validation_report, ValidationResult
 from wiki.knowledge_base import KnowledgeBase, KnowledgeEntry
-from yoy_comparator import YoYComparator, YoYReportComparator
-from report_parser import parse_published_report, PriorYearData
+import yoy_comparator as yoy_comparator_module
+yoy_comparator_module = importlib.reload(yoy_comparator_module)
+YoYComparator = yoy_comparator_module.YoYComparator
+YoYReportComparator = yoy_comparator_module.YoYReportComparator
+import report_parser as report_parser_module
+report_parser_module = importlib.reload(report_parser_module)
+parse_published_report = report_parser_module.parse_published_report
+parse_published_reports = report_parser_module.parse_published_reports
+PriorYearData = report_parser_module.PriorYearData
+import survey_parser as survey_parser_module
+survey_parser_module = importlib.reload(survey_parser_module)
+SurveyAggregator = survey_parser_module.SurveyAggregator
+SurveyReportGenerator = survey_parser_module.SurveyReportGenerator
+ingest_surveys = survey_parser_module.ingest_surveys
 
 st.set_page_config(page_title="TA效能分析工具", page_icon="📊", layout="wide")
 
@@ -36,6 +49,59 @@ def card(label, value):
                 unsafe_allow_html=True)
 
 
+def _company_name_scale(raw: dict, fallback_name: str = "未知公司") -> tuple:
+    info = raw.get('company_info', {}) if isinstance(raw, dict) else {}
+    name = (
+        info.get('公司名称') or info.get('company_name') or
+        info.get('公司') or fallback_name
+    )
+    scale = (
+        info.get('公司规模分类') or info.get('公司规模') or
+        info.get('scale') or 'B'
+    )
+    scale = str(scale).strip().upper()
+    if scale not in ('A', 'B'):
+        scale = 'B'
+    return str(name).strip() or fallback_name, scale
+
+
+def _fill_company_name_from_upload(raw: dict, filename: str) -> None:
+    """Use the upload filename when the questionnaire does not expose company name."""
+    info = raw.setdefault('company_info', {}) if isinstance(raw, dict) else {}
+    current = str(info.get('公司名称') or info.get('company_name') or '').strip()
+    if current and current.lower() not in {'未知', '未知公司', 'nan', 'none'}:
+        return
+    base = os.path.splitext(os.path.basename(filename))[0].strip()
+    base = re.sub(r'^\s*20\d{2}\s*TA\s*问卷[_ -]*医药行业版本[-_ ]*', '', base, flags=re.I)
+    base = re.sub(r'^\s*20\d{2}\s*TA\s*', '', base, flags=re.I)
+    base = re.sub(r'^\s*20\d{2}\s*', '', base, flags=re.I)
+    info['公司名称'] = base or filename
+
+
+def _add_survey_from_file(survey_agg: SurveyAggregator, filepath: str, raw: dict, fallback_name: str) -> Optional[str]:
+    try:
+        company, scale = _company_name_scale(raw, fallback_name)
+        survey = ingest_surveys(filepath, company, scale)
+        if survey.get('sheet3') or survey.get('sheet4') or survey.get('sheet5'):
+            survey_agg.add_company(
+                company, scale,
+                sheet3=survey.get('sheet3'),
+                sheet4=survey.get('sheet4'),
+                sheet5=survey.get('sheet5'),
+            )
+    except Exception as exc:
+        return f"{fallback_name}: 问卷Sheets 3/4/5解析失败: {exc}"
+    return None
+
+
+def _survey_trend_text(survey_agg: SurveyAggregator, curr_year: str, prev_year: str) -> dict:
+    if not (survey_agg.sheet3_responses or survey_agg.sheet4_data or survey_agg.sheet5_responses):
+        return {}
+    return SurveyReportGenerator(survey_agg).generate_split_reports(
+        curr_year=curr_year, prev_year=prev_year
+    )
+
+
 # ==================== 侧边栏 ====================
 with st.sidebar:
     st.markdown("## 📊 TA效能分析工具")
@@ -44,13 +110,13 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 📋 使用步骤")
     if "年度对比" in mode:
-        st.markdown("1. 上传本年度问卷\n2. 上传上年度**发布报告**或问卷\n3. AI自动比对分析\n4. 生成趋势报告\n5. 下载结果")
+        st.markdown("1. 上传本年度问卷\n2. 上传上年度**最终口径表**或问卷\n3. 自动比对分析\n4. 生成趋势报告\n5. 下载结果")
     elif "行业" in mode:
         st.markdown("1. 上传多家公司问卷\n2. 系统批量解析\n3. 生成行业P50报告\n4. 下载结果")
     else:
         st.markdown("1. 上传单家问卷\n2. 自动解析数据\n3. 查看分析报告\n4. 下载结果")
     st.markdown("---")
-    st.caption("v2.0 · 支持20家公司 · 26个分析维度 · 年度对比")
+    st.caption("v2.1-fixed · 固定口径：一级渠道/外部渠道细分/同公司闭合校验")
 
 # ==================== 主页面 ====================
 st.markdown("# 📊 TA效能报告 - 自动化分析工具")
@@ -62,17 +128,17 @@ if "年度对比" in mode:
     # 选择上年度数据来源模式
     yoy_mode = st.radio(
         "上年度数据来源",
-        ["📄 发布报告（推荐）", "📋 调研问卷"],
+        ["📊 最终口径表（推荐）", "📋 调研问卷"],
         index=0,
         horizontal=True,
-        help="推荐使用发布报告：数据已经过审核trim，与正式报告一致，避免原始数据偏差"
+        help="推荐使用上一年度最终报告口径表：直接引用已发布分析结果，比PDF/PPTX或中间总表抽数更稳定"
     )
 
-    use_report_mode = "发布报告" in yoy_mode
+    use_report_mode = "最终口径表" in yoy_mode
 
     if use_report_mode:
         # ==================== 报告模式 ====================
-        st.markdown("当年上传**调研问卷**，上年度上传**发布版报告**(PDF/PPTX)，确保趋势对比数据与正式发布一致。")
+        st.markdown("当年上传**调研问卷**，上年度上传**最终报告口径表**(XLSX/XLS)，直接引用已发布分析结果。")
 
         col_curr, col_prev = st.columns(2)
         with col_curr:
@@ -86,15 +152,15 @@ if "年度对比" in mode:
                 st.success(f"已选择 {len(curr_files)} 个问卷文件")
 
         with col_prev:
-            st.markdown("#### 📄 上年度发布报告")
+            st.markdown("#### 📊 上年度最终口径表")
             prev_year = st.text_input("上年度", value="2024", key="prev_year_rpt")
             prev_report_file = st.file_uploader(
-                f"上传 {prev_year} 年发布报告",
-                type=['pdf', 'pptx'], accept_multiple_files=False, key="prev_report_file"
+                f"上传 {prev_year} 年最终口径表",
+                type=['xlsx', 'xls'], accept_multiple_files=True, key="prev_report_file"
             )
             if prev_report_file:
-                st.success(f"✅ 已选择报告: {prev_report_file.name}")
-                st.caption("支持格式: PDF (行业报告) 或 PPTX (效能报告)")
+                st.success(f"✅ 已选择 {len(prev_report_file)} 个口径表文件")
+                st.caption("优先上传最终报告口径表；仍支持多份 XLSX / XLS 作为备用")
 
         can_run = curr_files and prev_report_file
         if can_run:
@@ -103,6 +169,7 @@ if "年度对比" in mode:
 
                 # Phase 1: 摄入本年度问卷
                 curr_agg = IndustryAggregator()
+                survey_agg = SurveyAggregator()
                 raw_list = []
                 curr_errs = []
                 tmp_files = []
@@ -117,7 +184,11 @@ if "年度对比" in mode:
                             tmp_path = tmp.name
                         tmp_files.append(tmp_path)
                         raw = ingest_company(tmp_path)
+                        _fill_company_name_from_upload(raw, f.name)
                         raw_list.append(raw)
+                        survey_err = _add_survey_from_file(survey_agg, tmp_path, raw, f.name)
+                        if survey_err:
+                            curr_errs.append(survey_err)
                     except Exception as e:
                         curr_errs.append(f"{f.name}: {e}")
                 # Cleanup temp files
@@ -129,21 +200,23 @@ if "年度对比" in mode:
                 for data in cleaned:
                     curr_agg.add_company(data)
 
-                # Phase 2: 解析上年度发布报告
-                progress.progress(0.6, text=f"📄 解析{prev_year}年发布报告...")
-                ext = os.path.splitext(prev_report_file.name)[1].lower()
-                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-                    tmp.write(prev_report_file.getvalue())
-                    tmp_path = tmp.name
-
+                # Phase 2: 解析上年度最终口径表
+                progress.progress(0.6, text=f"📊 解析{prev_year}年最终口径表...")
+                prev_tmp_paths = []
                 try:
-                    prev_data = parse_published_report(tmp_path, year=prev_year)
+                    for f in prev_report_file:
+                        ext = os.path.splitext(f.name)[1].lower()
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                            tmp.write(f.getvalue())
+                            prev_tmp_paths.append(tmp.name)
+                    prev_data = parse_published_reports(prev_tmp_paths, year=prev_year)
                 except Exception as e:
-                    st.error(f"报告解析失败: {e}")
+                    st.error(f"上年度最终口径表解析失败: {e}")
                     prev_data = None
                 finally:
-                    try: os.unlink(tmp_path)
-                    except: pass
+                    for tp in prev_tmp_paths:
+                        try: os.unlink(tp)
+                        except: pass
 
                 if prev_data:
                     # Phase 3: 生成本年度行业报告
@@ -153,9 +226,11 @@ if "年度对比" in mode:
 
                     # Phase 4: 生成年度对比报告（报告模式）
                     progress.progress(0.9, text="📈 生成年度对比趋势报告...")
+                    survey_trend_report = _survey_trend_text(survey_agg, curr_year, prev_year)
                     comparator = YoYReportComparator(
                         curr_agg, prev_data,
-                        curr_year=curr_year, prev_year=prev_year
+                        curr_year=curr_year, prev_year=prev_year,
+                        survey_trend_report=survey_trend_report
                     )
                     yoy_report = comparator.generate_yoy_report()
                     yoy_table = comparator.export_comparison_table()
@@ -166,6 +241,7 @@ if "年度对比" in mode:
                     st.session_state['yoy_prev_data'] = prev_data
                     st.session_state['yoy_curr_report'] = curr_report
                     st.session_state['yoy_report'] = yoy_report
+                    st.session_state['survey_trend_report'] = survey_trend_report
                     st.session_state['yoy_table'] = yoy_table
                     st.session_state['yoy_comparator'] = comparator
                     st.session_state['yoy_curr_year'] = curr_year
@@ -207,6 +283,7 @@ if "年度对比" in mode:
                 def _ingest_batch(files, label):
                     """批量摄入一批问卷文件"""
                     agg = IndustryAggregator()
+                    survey_agg = SurveyAggregator()
                     raw_list = []
                     errs = []
                     tmp_paths = []
@@ -221,7 +298,11 @@ if "年度对比" in mode:
                                 tmp_path = tmp.name
                             tmp_paths.append(tmp_path)
                             raw = ingest_company(tmp_path)
+                            _fill_company_name_from_upload(raw, f.name)
                             raw_list.append(raw)
+                            survey_err = _add_survey_from_file(survey_agg, tmp_path, raw, f.name)
+                            if survey_err:
+                                errs.append(survey_err)
                         except Exception as e:
                             errs.append(f"{f.name}: {e}")
                     # Cleanup temp files after all ingestion done
@@ -232,13 +313,13 @@ if "年度对比" in mode:
                     cleaned, _, _ = validate_and_clean(raw_list)
                     for data in cleaned:
                         agg.add_company(data)
-                    return agg, errs
+                    return agg, errs, survey_agg
 
                 # Phase 1: 摄入本年度
-                curr_agg, curr_errs = _ingest_batch(curr_files, f"{curr_year}年")
+                curr_agg, curr_errs, curr_survey_agg = _ingest_batch(curr_files, f"{curr_year}年")
 
                 # Phase 2: 摄入上年度
-                prev_agg, prev_errs = _ingest_batch(prev_files, f"{prev_year}年")
+                prev_agg, prev_errs, _ = _ingest_batch(prev_files, f"{prev_year}年")
 
                 # Phase 3: 生成本年度行业报告（保留）
                 progress.progress(0.7, text="📊 生成本年度行业报告...")
@@ -250,7 +331,24 @@ if "年度对比" in mode:
                 comparator = YoYComparator(curr_agg, prev_agg,
                                            curr_year=curr_year, prev_year=prev_year)
                 yoy_report = comparator.generate_yoy_report()
+                survey_trend_report = _survey_trend_text(curr_survey_agg, curr_year, prev_year)
+                if survey_trend_report:
+                    survey_parts = [
+                        survey_trend_report.get('sheet4', ''),
+                        survey_trend_report.get('sheet3', ''),
+                        survey_trend_report.get('sheet5', ''),
+                    ]
+                    yoy_report = "\n".join([
+                        yoy_report,
+                        "\n---\n## 2026新增HC预测与热点岗位前瞻（Sheet 4）\n",
+                        survey_parts[0],
+                        "\n---\n## TA招聘实践趋势分析（Sheet 3）\n",
+                        survey_parts[1],
+                        "\n---\n## 高管任期变化趋势分析（Sheet 5）\n",
+                        survey_parts[2],
+                    ])
                 yoy_table = comparator.export_comparison_table()
+                same_company_table = comparator.export_same_company_table()
 
                 progress.progress(1.0, text="✅ 年度对比分析完成!")
 
@@ -258,7 +356,9 @@ if "年度对比" in mode:
                 st.session_state['yoy_prev_agg'] = prev_agg
                 st.session_state['yoy_curr_report'] = curr_report
                 st.session_state['yoy_report'] = yoy_report
+                st.session_state['survey_trend_report'] = survey_trend_report
                 st.session_state['yoy_table'] = yoy_table
+                st.session_state['same_company_table'] = same_company_table
                 st.session_state['yoy_comparator'] = comparator
                 st.session_state['yoy_curr_year'] = curr_year
                 st.session_state['yoy_prev_year'] = prev_year
@@ -274,9 +374,15 @@ if "年度对比" in mode:
         curr_report = st.session_state['yoy_curr_report']
         yoy_report = st.session_state['yoy_report']
         yoy_table = st.session_state['yoy_table']
+        same_company_table = st.session_state.get('same_company_table', pd.DataFrame())
         cy = st.session_state['yoy_curr_year']
         py = st.session_state['yoy_prev_year']
         is_report_mode = st.session_state.get('yoy_mode') == 'report'
+        same_company_available = (
+            not is_report_mode
+            and isinstance(same_company_table, pd.DataFrame)
+            and not same_company_table.empty
+        )
 
         if 'yoy_errors' in st.session_state:
             with st.expander("⚠️ 处理警告", expanded=False):
@@ -288,7 +394,7 @@ if "年度对比" in mode:
         # 数据来源标识
         if is_report_mode:
             prev_data = st.session_state.get('yoy_prev_data')
-            st.info(f"📄 **报告模式**: {cy}年调研数据 vs {py}年发布报告 ({prev_data.source_file if prev_data else 'N/A'})")
+            st.info(f"📊 **最终口径表模式**: {cy}年调研数据 vs {py}年最终口径表 ({prev_data.source_file if prev_data else 'N/A'})")
         else:
             st.info(f"📋 **问卷模式**: {cy}年调研数据 vs {py}年调研数据")
 
@@ -299,7 +405,7 @@ if "年度对比" in mode:
         with c2:
             if is_report_mode:
                 prev_data = st.session_state.get('yoy_prev_data')
-                card(f"{py} 数据来源", "发布报告")
+                card(f"{py} 数据来源", "最终口径表")
             else:
                 prev_agg = st.session_state.get('yoy_prev_agg')
                 prev_s = prev_agg.get_summary() if prev_agg else {}
@@ -329,6 +435,8 @@ if "年度对比" in mode:
             "🔬 维度明细对比",
             "📄 完整对比报告"
         ]
+        if same_company_available:
+            tabs.append("🏢 同公司年度比较")
         if is_report_mode:
             tabs.append("🔍 数据提取审核")
 
@@ -337,7 +445,8 @@ if "年度对比" in mode:
         tab_curr = tab_objs[1]
         tab_detail = tab_objs[2]
         tab_full = tab_objs[3]
-        tab_audit = tab_objs[4] if is_report_mode else None
+        tab_same_company = tab_objs[4] if same_company_available else None
+        tab_audit = tab_objs[5 if same_company_available else 4] if is_report_mode else None
 
         with tab_yoy:
             st.markdown(f"### {py} vs {cy} 关键指标变化一览")
@@ -374,10 +483,20 @@ if "年度对比" in mode:
         with tab_full:
             st.markdown(yoy_report)
 
+        if tab_same_company is not None:
+            with tab_same_company:
+                st.markdown("### 相同公司样本年度比较")
+                st.caption("仅使用两年均上传且成功识别的公司，剔除只在单一年份出现的公司。")
+                for module in same_company_table['模块'].unique():
+                    sub = same_company_table[same_company_table['模块'] == module]
+                    if not sub.empty:
+                        st.markdown(f"#### {module}")
+                        st.dataframe(sub.drop(columns=['模块']), use_container_width=True, hide_index=True)
+
         if tab_audit is not None:
             with tab_audit:
                 st.markdown("### 🔍 上年度报告数据提取审核")
-                st.markdown("以下是从上年度发布报告中自动提取的数据点，请核实准确性：")
+                st.markdown("以下是从上年度最终口径表中自动提取的数据点，请核实准确性：")
                 prev_data = st.session_state.get('yoy_prev_data')
                 if prev_data:
                     st.markdown(f"**报告来源**: {prev_data.source_file}")
@@ -395,12 +514,13 @@ if "年度对比" in mode:
                     st.dataframe(pd.DataFrame(audit_rows), use_container_width=True, hide_index=True)
 
                     st.markdown("---")
-                    st.warning("⚠️ **重要**: PDF中的数据提取依赖文本模式匹配，请仔细核对以上数据与发布报告原文是否一致。如有偏差，可手动修正后重新运行。")
+                    st.info("✅ 当前使用最终口径Excel作为上年度数据源，不再依赖PDF/PPTX或中间总表抽取。")
 
         # 下载区
         st.markdown("---")
         st.markdown("### 📥 下载结果")
-        c1, c2, c3 = st.columns(3)
+        download_cols = st.columns(4 if same_company_available else 3)
+        c1, c2, c3 = download_cols[:3]
         with c1:
             mode_label = "报告模式" if is_report_mode else "问卷模式"
             st.download_button(f"📈 下载年度对比报告", data=yoy_report,
@@ -415,15 +535,21 @@ if "年度对比" in mode:
             st.download_button("📊 下载对比数据 (CSV)", data=yoy_csv,
                                file_name=f"年度对比数据_{py}_vs_{cy}.csv",
                                mime="text/csv", use_container_width=True)
+        if same_company_available:
+            with download_cols[3]:
+                same_csv = same_company_table.to_csv(index=False, encoding='utf-8-sig')
+                st.download_button("🏢 下载同公司对比 (CSV)", data=same_csv,
+                                   file_name=f"同公司年度对比_{py}_vs_{cy}.csv",
+                                   mime="text/csv", use_container_width=True)
 
     elif not can_run:
         st.markdown("---")
         if use_report_mode:
             c1, c2, c3 = st.columns(3)
             with c1: st.markdown("### 📂 Step 1\n左侧上传当年调研问卷")
-            with c2: st.markdown("### 📄 Step 2\n右侧上传上年度发布报告(PDF/PPTX)")
-            with c3: st.markdown("### 📈 Step 3\nAI比对调研数据 vs 发布报告")
-            st.info("👆 请上传当年调研问卷和上年度发布报告")
+            with c2: st.markdown("### 📊 Step 2\n右侧上传上年度最终口径表(XLSX)")
+            with c3: st.markdown("### 📈 Step 3\n比对调研数据 vs 最终口径表")
+            st.info("👆 请上传当年调研问卷和上年度最终口径表")
         else:
             c1, c2, c3 = st.columns(3)
             with c1: st.markdown("### 📂 Step 1\n分别上传两年的问卷数据")
@@ -569,22 +695,36 @@ elif "行业" in mode:
 
             with tab2:
                 # 招聘渠道
-                st.markdown("### 招聘渠道分布 P50")
+                st.markdown("### 一级招聘渠道分布 P50")
+                st.caption("一级渠道：HR直招、外部渠道、内部渠道；外部渠道=猎头+内推+主动投递+校招+RPO，内部渠道=内部转岗。渠道占比0值为有效值，不做trim。")
                 ch_data = []
                 for _, row in overall.iterrows():
-                    t = row.get('招聘总量', 0) or 0
-                    if t <= 0: continue
+                    hr_n = row.get('HR直招', 0) or 0
+                    hh_n = row.get('猎头_人', 0) or 0
+                    ref_n = row.get('内推_人', 0) or 0
+                    rpo_n = row.get('RPO_人', 0) or 0
+                    apply_n = row.get('主动投递', 0) or 0
+                    campus_n = row.get('校招', 0) or 0
+                    transfer_n = row.get('内部转岗', 0) or 0
+                    ext_n = hh_n + ref_n + rpo_n + apply_n + campus_n
+                    t = hr_n + ext_n + transfer_n
+                    if t <= 0:
+                        continue
                     ch_data.append({
                         '规模': row['规模'],
-                        'HR直招': (row.get('HR直招', 0) or 0) / t,
-                        '猎头': (row.get('猎头_人', 0) or 0) / t,
-                        '内推': (row.get('内推_人', 0) or 0) / t,
-                        '内部转岗': (row.get('内部转岗', 0) or 0) / t,
+                        'HR直招': hr_n / t,
+                        '外部渠道': ext_n / t,
+                        '内部渠道': transfer_n / t,
+                        '猎头': hh_n / ext_n if ext_n > 0 else np.nan,
+                        '内推': ref_n / ext_n if ext_n > 0 else np.nan,
+                        '主动投递': apply_n / ext_n if ext_n > 0 else np.nan,
+                        '校招': campus_n / ext_n if ext_n > 0 else np.nan,
+                        'RPO': rpo_n / ext_n if ext_n > 0 else np.nan,
                     })
                 if ch_data:
                     chdf = pd.DataFrame(ch_data)
                     ch_table = []
-                    for ch in ['HR直招', '猎头', '内推', '内部转岗']:
+                    for ch in ['HR直招', '外部渠道', '内部渠道']:
                         ch_table.append({
                             '渠道': ch,
                             '整体P50': f"{chdf[ch].median():.1%}",
@@ -592,6 +732,23 @@ elif "行业" in mode:
                             'B类P50': f"{chdf[chdf['规模']=='B'][ch].median():.1%}" if len(chdf[chdf['规模']=='B']) > 0 else 'N/A',
                         })
                     st.dataframe(pd.DataFrame(ch_table), use_container_width=True, hide_index=True)
+
+                    st.markdown("### 外部渠道细分 P50（占外部渠道）")
+                    ext_table = []
+                    for ch in ['猎头', '内推', '主动投递', '校招']:
+                        ext_table.append({
+                            '外部渠道': ch,
+                            '整体P50': f"{chdf[ch].median():.1%}",
+                            'A类P50': f"{chdf[chdf['规模']=='A'][ch].median():.1%}" if len(chdf[chdf['规模']=='A']) > 0 else 'N/A',
+                            'B类P50': f"{chdf[chdf['规模']=='B'][ch].median():.1%}" if len(chdf[chdf['规模']=='B']) > 0 else 'N/A',
+                        })
+                    ext_table.append({
+                        '外部渠道': 'RPO',
+                        '整体P50': f"{chdf['RPO'].median():.1%}",
+                        'A类P50': 'N/A',
+                        'B类P50': 'N/A',
+                    })
+                    st.dataframe(pd.DataFrame(ext_table), use_container_width=True, hide_index=True)
 
                 # 招聘周期
                 st.markdown("### 各职能招聘周期 P50（天）")
@@ -607,15 +764,16 @@ elif "行业" in mode:
 
                 # 招聘成本
                 st.markdown("### 渠道单个职位招聘成本 P50（万元）")
+                st.caption("口径：各职能外部渠道费用成本 / 各职能（猎头+内部推荐+RPO+主动投递+校招）的招聘总数")
                 cost_table = []
                 for func in ['早期研发', '临床开发', '商业', '生产及供应链', '职能']:
                     fd = func_df[func_df['职能'] == func]
                     costs = []
                     for _, row in fd.iterrows():
                         c = pd.to_numeric(row.get('外部渠道成本_万'), errors='coerce')
-                        t = pd.to_numeric(row.get('招聘总量'), errors='coerce')
-                        if pd.notna(c) and pd.notna(t) and t > 0:
-                            costs.append(c / t)
+                        external_hires = _external_cost_hire_count(row)
+                        if pd.notna(c) and c > 0 and external_hires > 0:
+                            costs.append(c / external_hires)
                     if costs:
                         cost_table.append({'职能': func, 'P50': f"{np.median(costs):.2f}",
                                            '样本数': len(costs)})

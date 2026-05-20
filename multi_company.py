@@ -17,6 +17,19 @@ from wiki.knowledge_base import KnowledgeBase, KnowledgeEntry
 from data_validator import DataValidator, validate_and_clean, generate_validation_report
 
 
+def _external_cost_hire_count(row) -> float:
+    """单个职位招聘成本分母：猎头 + 内推 + RPO + 主动投递 + 校招招聘人数。"""
+    total = 0.0
+    for col in ['猎头_人', '内推_人', 'RPO_人', '主动投递', '校招']:
+        try:
+            v = pd.to_numeric(row.get(col), errors='coerce')
+            if pd.notna(v):
+                total += float(v)
+        except Exception:
+            pass
+    return total
+
+
 # ============================================================
 # 0. 数据审核与Trim（过滤脱靶数据）
 # ============================================================
@@ -722,21 +735,29 @@ class IndustryReportGenerator:
 
         channel_data = []
         for _, row in overall.iterrows():
-            total = _safe(row.get('招聘总量', 0))
+            hr_n = _safe(row.get('HR直招', 0))
+            hh_n = _safe(row.get('猎头_人', 0))
+            ref_n = _safe(row.get('内推_人', 0))
+            transfer_n = _safe(row.get('内部转岗', 0))
+            rpo_n = _safe(row.get('RPO_人', 0))
+            apply_n = _safe(row.get('主动投递', 0))
+            campus_n = _safe(row.get('校招', 0))
+            ext_n = hh_n + rpo_n + ref_n + apply_n + campus_n
+            total = hr_n + ext_n + transfer_n
             if total <= 0:
                 continue
-            hr = _safe(row.get('HR直招', 0)) / total
-            hh = _safe(row.get('猎头_人', 0)) / total
-            ref = _safe(row.get('内推_人', 0)) / total
-            transfer = _safe(row.get('内部转岗', 0)) / total
-            rpo = _safe(row.get('RPO_人', 0)) / total
-            apply_direct = _safe(row.get('主动投递', 0)) / total
-            campus = _safe(row.get('校招', 0)) / total
-            ext = hh + rpo + ref + apply_direct + campus
+            hr = hr_n / total
+            transfer = transfer_n / total
+            ext = ext_n / total
+            hh = hh_n / ext_n if ext_n > 0 else np.nan
+            ref = ref_n / ext_n if ext_n > 0 else np.nan
+            rpo = rpo_n / ext_n if ext_n > 0 else np.nan
+            apply_direct = apply_n / ext_n if ext_n > 0 else np.nan
+            campus = campus_n / ext_n if ext_n > 0 else np.nan
             channel_data.append({
                 '公司': row['公司'], '规模': row['规模'],
                 'HR直招': hr, '外部渠道': ext, '内部渠道': transfer,
-                '猎头': hh, '内推': ref,
+                '猎头': hh, '内推': ref, '主动投递': apply_direct, '校招': campus, 'RPO': rpo,
             })
 
         ch_df = pd.DataFrame(channel_data)
@@ -755,14 +776,15 @@ class IndustryReportGenerator:
             p50_b = ch_df[ch_df['规模'] == 'B'][ch].median() if len(ch_df[ch_df['规模'] == 'B']) > 0 else np.nan
             lines.append(f"| {ch} | {_fmt_pct(p50_all)} | {_fmt_pct(p50_a)} | {_fmt_pct(p50_b)} |")
 
-        lines.append("\n#### 外部渠道细分 P50")
+        lines.append("\n#### 外部渠道细分 P50（占外部渠道）")
         lines.append("| 渠道 | 整体 | A类 | B类 |")
         lines.append("|------|------|-----|-----|")
-        for ch in ['猎头', '内推']:
+        for ch in ['猎头', '内推', '主动投递', '校招']:
             p50_all = ch_df[ch].median()
             p50_a = ch_df[ch_df['规模'] == 'A'][ch].median() if len(ch_df[ch_df['规模'] == 'A']) > 0 else np.nan
             p50_b = ch_df[ch_df['规模'] == 'B'][ch].median() if len(ch_df[ch_df['规模'] == 'B']) > 0 else np.nan
             lines.append(f"| {ch} | {_fmt_pct(p50_all)} | {_fmt_pct(p50_a)} | {_fmt_pct(p50_b)} |")
+        lines.append(f"| RPO | {_fmt_pct(ch_df['RPO'].median())} | N/A | N/A |")
 
         return lines
 
@@ -776,6 +798,7 @@ class IndustryReportGenerator:
             return lines
 
         lines.append("#### 渠道单个职位招聘成本 P50（万元）")
+        lines.append("> 口径：各职能外部渠道费用成本 / 各职能（猎头+内部推荐+RPO+主动投递）的招聘总数。")
         lines.append("| 职能 | P50 |")
         lines.append("|------|-----|")
         for func in ['早期研发', '临床开发', '商业', '生产及供应链', '职能']:
@@ -783,9 +806,9 @@ class IndustryReportGenerator:
             costs = []
             for _, row in fd.iterrows():
                 cost = pd.to_numeric(row.get('外部渠道成本_万'), errors='coerce')
-                total = pd.to_numeric(row.get('招聘总量'), errors='coerce')
-                if pd.notna(cost) and pd.notna(total) and total > 0:
-                    costs.append(cost / total)
+                external_hires = _external_cost_hire_count(row)
+                if pd.notna(cost) and cost > 0 and external_hires > 0:
+                    costs.append(cost / external_hires)
             if costs:
                 lines.append(f"| {func} | {np.median(costs):.2f} |")
 
@@ -1019,6 +1042,7 @@ class IndustryReportGenerator:
 
         func_df = self.df[(self.df['层级'] == '一级职能') & (self.df['职级'] == '整体')]
         lines.append("#### 不同职能人均招聘成本（万元）")
+        lines.append("> 口径：各职能外部渠道费用成本 / 各职能（猎头+内部推荐+RPO+主动投递）的招聘总数。")
         lines.append("| 职能 | n | P25 | P50 | P75 | 平均 |")
         lines.append("|------|---|-----|-----|-----|------|")
         for func in ['早期研发', '临床开发', '商业', '生产及供应链', '职能']:
@@ -1026,9 +1050,9 @@ class IndustryReportGenerator:
             costs = []
             for _, row in fd.iterrows():
                 cost = pd.to_numeric(row.get('外部渠道成本_万'), errors='coerce')
-                total = pd.to_numeric(row.get('招聘总量'), errors='coerce')
-                if pd.notna(cost) and pd.notna(total) and total > 0:
-                    costs.append(cost / total)
+                external_hires = _external_cost_hire_count(row)
+                if pd.notna(cost) and cost > 0 and external_hires > 0:
+                    costs.append(cost / external_hires)
             p = self._pct(pd.Series(costs))
             fmt = lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
             n_note = f"⚠️{p['n']}" if p['n'] <= 2 else str(p['n'])
