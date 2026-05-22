@@ -120,6 +120,12 @@ def ta_audit_questionnaires(questionnaire_paths: list[str]) -> dict:
     return service.audit_questionnaires(questionnaire_paths)
 
 
+@mcp.tool()
+def ta_get_pptx_report_skill() -> dict:
+    """Return the bundled data-driven PPT skill for TA report deck generation."""
+    return service.get_pptx_report_skill()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the TA Report MCP server.")
     parser.add_argument(

@@ -9,6 +9,7 @@ This wrapper exposes the current TA report logic as MCP tools for Lobe.
 - `ta_compare_questionnaire_years`: raw questionnaire versus raw questionnaire YoY comparison, including same-company output.
 - `ta_extract_survey_sections`: Sheet 3, Sheet 4, and Sheet 5 sections only.
 - `ta_audit_questionnaires`: ingestion, validation, and trim audit details.
+- `ta_get_pptx_report_skill`: bundled PPT skill for consulting-style TA report deck planning.
 
 ## Current report conventions
 

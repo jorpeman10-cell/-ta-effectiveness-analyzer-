@@ -16,6 +16,12 @@ from yoy_comparator import YoYComparator, YoYReportComparator
 
 EXCEL_EXTENSIONS = {".xlsx", ".xls"}
 REPORT_EXTENSIONS = {".xlsx", ".xls", ".pdf", ".ppt", ".pptx"}
+PPTX_SKILL_REFERENCE = (
+    Path(__file__).resolve().parents[1]
+    / "ta-report-skill"
+    / "references"
+    / "data-driven-pptx.md"
+)
 
 
 @dataclass
@@ -266,3 +272,16 @@ def audit_questionnaires(questionnaire_paths: Iterable[str]) -> dict[str, Any]:
         }
     )
     return meta
+
+
+def get_pptx_report_skill() -> dict[str, Any]:
+    """Return the bundled TA PPT report-generation skill reference."""
+    return {
+        "skill_name": "data-driven-pptx",
+        "scope": "TA effectiveness report decks",
+        "skill_markdown": PPTX_SKILL_REFERENCE.read_text(encoding="utf-8"),
+        "usage_note": (
+            "Use this after TA report markdown or comparison tables are available. "
+            "Keep slide conclusions tied to the latest report values."
+        ),
+    }

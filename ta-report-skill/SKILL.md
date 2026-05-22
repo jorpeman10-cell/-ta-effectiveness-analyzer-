@@ -1,6 +1,6 @@
 ---
 name: ta-report-analyzer
-description: Use the TA report analyzer for medical-health TA questionnaire ingestion, yearly comparison, report markdown generation, Sheet 3/4/5 survey analysis, channel/cost/productivity audits, and Lobe MCP packaging or operation.
+description: Use the TA report analyzer for medical-health TA questionnaire ingestion, yearly comparison, report markdown generation, PPT report preparation, Sheet 3/4/5 survey analysis, channel/cost/productivity audits, and Lobe MCP packaging or operation.
 ---
 
 # TA Report Analyzer
@@ -34,3 +34,11 @@ Use `lobe_mcp/server.py` when the work should be callable from Lobe.
 - `ta_audit_questionnaires` is for coverage and parsing checks.
 
 Read `LOBE_MCP.md` when configuring Lobe Desktop or a hosted MCP endpoint.
+
+## PPT Reports
+
+When the user asks to convert a TA report into a slide deck, read
+`references/data-driven-pptx.md` before planning slides. Keep the PPT narrative
+driven by the latest report markdown and exported data tables, especially where
+channel definitions, sample coverage, Sheet 3/4/5 survey-only logic, or
+prior-year average substitutions affect the conclusion.
