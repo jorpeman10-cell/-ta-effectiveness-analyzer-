@@ -75,7 +75,8 @@ This repo includes `render.yaml` for a dedicated MCP web service.
    ```
 
 The server reads `HOST` and `PORT` from the deployment environment. `render.yaml`
-sets `HOST=0.0.0.0`, while Render provides the public service port.
+sets `HOST=0.0.0.0`, while Render provides the public service port. The HTTP
+server uses MCP's stateless JSON response mode for a hosted Lobe connection.
 
 Then configure Lobe with the HTTPS `/mcp` endpoint exposed by the hosted server.
 For a remote server, file paths must be paths the server can read. If Lobe users
