@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: ta-report-lobe-mcp
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python lobe_mcp/server.py --transport streamable-http
+    envVars:
+      - key: HOST
+        value: 0.0.0.0

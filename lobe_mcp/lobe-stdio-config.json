@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "ta-report-analyzer": {
+      "command": "C:\\Users\\EDY\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+      "args": [
+        "C:\\Users\\EDY\\.kimi\\skills\\ta_report_automation\\llm_wiki\\lobe_mcp\\server.py",
+        "--transport",
+        "stdio"
+      ],
+      "env": {
+        "PYTHONUTF8": "1"
+      }
+    }
+  }
+}
