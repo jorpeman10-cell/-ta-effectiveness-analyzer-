@@ -38,15 +38,9 @@ class McpPostAcceptMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http" and scope.get("method") == "POST":
             headers = list(scope.get("headers", []))
-            accept_headers = [value for key, value in headers if key == b"accept"]
-            accepts_mcp = any(
-                b"application/json" in value or b"text/event-stream" in value
-                for value in accept_headers
-            )
-            if not accepts_mcp:
-                headers = [(key, value) for key, value in headers if key != b"accept"]
-                headers.append((b"accept", b"application/json, text/event-stream"))
-                scope = {**scope, "headers": headers}
+            headers = [(key, value) for key, value in headers if key != b"accept"]
+            headers.append((b"accept", b"application/json, text/event-stream"))
+            scope = {**scope, "headers": headers}
         await self.app(scope, receive, send)
 
 
