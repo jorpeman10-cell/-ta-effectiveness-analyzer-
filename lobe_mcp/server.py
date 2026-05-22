@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.middleware.cors import CORSMiddleware
+from starlette.routing import Mount
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -110,7 +114,35 @@ def main() -> None:
         help="Use stdio for Lobe Desktop or streamable-http for a hosted endpoint.",
     )
     args = parser.parse_args()
-    mcp.run(transport=args.transport)
+    if args.transport == "stdio":
+        mcp.run(transport=args.transport)
+        return
+
+    import uvicorn
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: Starlette):
+        async with mcp.session_manager.run():
+            yield
+
+    # Lobe Web is a browser-based MCP client, so expose the HTTP transport
+    # through a CORS-enabled ASGI app instead of the direct FastMCP runner.
+    app = Starlette(
+        routes=[Mount("/", app=mcp.streamable_http_app())],
+        lifespan=lifespan,
+    )
+    cors_app = CORSMiddleware(
+        app,
+        allow_origins=["*"],
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["*"],
+        expose_headers=["Mcp-Session-Id"],
+    )
+    uvicorn.run(
+        cors_app,
+        host=os.getenv("HOST", "127.0.0.1"),
+        port=int(os.getenv("PORT", "8000")),
+    )
 
 
 if __name__ == "__main__":
