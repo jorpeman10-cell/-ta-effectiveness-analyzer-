@@ -29,6 +29,27 @@ mcp = FastMCP(
 )
 
 
+class McpPostAcceptMiddleware:
+    """Keep hosted browser clients on the JSON response path for MCP POSTs."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("method") == "POST":
+            headers = list(scope.get("headers", []))
+            accept_headers = [value for key, value in headers if key == b"accept"]
+            accepts_mcp = any(
+                b"application/json" in value or b"text/event-stream" in value
+                for value in accept_headers
+            )
+            if not accepts_mcp:
+                headers = [(key, value) for key, value in headers if key != b"accept"]
+                headers.append((b"accept", b"application/json, text/event-stream"))
+                scope = {**scope, "headers": headers}
+        await self.app(scope, receive, send)
+
+
 @mcp.tool()
 def ta_generate_industry_report(
     questionnaire_paths: list[str],
@@ -131,6 +152,7 @@ def main() -> None:
         routes=[Mount("/", app=mcp.streamable_http_app())],
         lifespan=lifespan,
     )
+    app = McpPostAcceptMiddleware(app)
     cors_app = CORSMiddleware(
         app,
         allow_origins=["*"],
