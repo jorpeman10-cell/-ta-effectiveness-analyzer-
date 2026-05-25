@@ -116,7 +116,11 @@ def ta_extract_survey_sections(
 
 @mcp.tool()
 def ta_audit_questionnaires(questionnaire_paths: list[str]) -> dict:
-    """Audit TA questionnaire parsing, validation, and flattened record coverage."""
+    """Audit questionnaire parsing and return TA FTE/third-party staffing coverage.
+
+    The response includes extracted TA personnel configuration values as well as
+    record coverage, so use it when verifying whether staffing fields were read.
+    """
     return service.audit_questionnaires(questionnaire_paths)
 
 

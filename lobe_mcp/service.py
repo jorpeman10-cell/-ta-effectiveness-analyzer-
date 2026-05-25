@@ -409,11 +409,25 @@ def audit_questionnaires(questionnaire_paths: Iterable[str]) -> dict[str, Any]:
     """Audit ingestion, validation, and flattened record coverage for questionnaires."""
     batch = _ingest_questionnaires(questionnaire_paths)
     audit_log = batch.aggregator.run_audit()
+    comparator = YoYReportComparator(
+        batch.aggregator,
+        PriorYearData(),
+    )
+    ta_configuration = _plain_ta_config(comparator._curr_ta_config_summary())
     meta = _batch_meta(batch)
     meta.update(
         {
             "trimmed_audit_count": len(audit_log),
             "trimmed_audit_report": getattr(batch.aggregator, "audit_report", ""),
+            "ta_configuration": {
+                "metric_definitions": {
+                    "TA_FTE": "内部TA人员数量（人）",
+                    "TA_第三方": "外部第三方招聘人员数量（包括RPO，人）",
+                },
+                "coverage": "TA人员配置正值样本P50，0值trim。",
+                "overall": ta_configuration,
+                "table_markdown": _ta_config_markdown(ta_configuration, include_samples=True),
+            },
         }
     )
     return meta
