@@ -121,6 +121,29 @@ def ta_audit_questionnaires(questionnaire_paths: list[str]) -> dict:
 
 
 @mcp.tool()
+def ta_extract_ta_configuration(
+    current_questionnaire_paths: list[str],
+    previous_questionnaire_paths: list[str] | None = None,
+    prior_metric_paths: list[str] | None = None,
+    curr_year: str = "2025",
+    prev_year: str = "2024",
+) -> dict:
+    """Extract TA FTE and external third-party/RPO staffing configuration.
+
+    Current-year questionnaires provide the complete available TA configuration
+    view. Prior-year final metric files may contain only chart-labelled values,
+    and the response marks that partial coverage explicitly.
+    """
+    return service.extract_ta_configuration(
+        current_questionnaire_paths,
+        previous_questionnaire_paths=previous_questionnaire_paths,
+        prior_metric_paths=prior_metric_paths,
+        curr_year=curr_year,
+        prev_year=prev_year,
+    )
+
+
+@mcp.tool()
 def ta_get_pptx_report_skill() -> dict:
     """Return the bundled data-driven PPT skill for TA report deck generation."""
     return service.get_pptx_report_skill()

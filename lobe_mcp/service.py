@@ -9,7 +9,7 @@ from typing import Any, Iterable
 
 from data_validator import validate_and_clean
 from multi_company import IndustryAggregator, IndustryReportGenerator, ingest_company
-from report_parser import parse_published_reports
+from report_parser import PriorYearData, parse_published_reports
 from survey_parser import SurveyAggregator, SurveyReportGenerator, ingest_surveys
 from yoy_comparator import YoYComparator, YoYReportComparator
 
@@ -256,6 +256,151 @@ def compare_with_prior_metrics(
         "report_markdown": comparator.generate_yoy_report(),
         "comparison_table_markdown": comparator.export_comparison_table().to_markdown(index=False),
         "prior_metric_files": prior_files,
+        "current": _batch_meta(current),
+    }
+
+
+def _plain_ta_config(values: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Convert TA configuration stats to JSON-safe Python scalars."""
+    normalized: dict[str, dict[str, Any]] = {}
+    for label, metrics in values.items():
+        record: dict[str, Any] = {}
+        for key, value in metrics.items():
+            if value is None:
+                record[key] = None
+                continue
+            try:
+                record[key] = None if value != value else (int(value) if key.endswith("_n") else float(value))
+            except TypeError:
+                record[key] = value
+        normalized[label] = record
+    return normalized
+
+
+def _ta_config_markdown(
+    values: dict[str, dict[str, Any]],
+    include_samples: bool,
+) -> str:
+    headers = ["配置维度", "TA FTE P50", "第三方TA/RPO P50"]
+    if include_samples:
+        headers = ["配置维度", "TA FTE P50", "TA FTE有效样本", "第三方TA/RPO P50", "第三方有效样本"]
+    lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
+    for label, metrics in values.items():
+        fte = metrics.get("TA_FTE_P50")
+        third = metrics.get("TA_第三方_P50")
+        fields = [label, "N/A" if fte is None else f"{fte:.2f}"]
+        if include_samples:
+            fields.append(str(int(metrics.get("TA_FTE_n", 0))))
+        fields.append("N/A" if third is None else f"{third:.2f}")
+        if include_samples:
+            fields.append(str(int(metrics.get("TA_第三方_n", 0))))
+        lines.append("| " + " | ".join(fields) + " |")
+    return "\n".join(lines)
+
+
+def extract_ta_configuration(
+    current_questionnaire_paths: Iterable[str],
+    previous_questionnaire_paths: Iterable[str] | None = None,
+    prior_metric_paths: Iterable[str] | None = None,
+    curr_year: str = "2025",
+    prev_year: str = "2024",
+) -> dict[str, Any]:
+    """Extract internal TA FTE and external third-party/RPO personnel configuration."""
+    current = _ingest_questionnaires(current_questionnaire_paths)
+    prior_data = PriorYearData(year=prev_year)
+    prior_files: list[str] = []
+    previous_batch: QuestionnaireBatch | None = None
+    if previous_questionnaire_paths:
+        previous_batch = _ingest_questionnaires(previous_questionnaire_paths)
+    elif prior_metric_paths:
+        prior_files = _expand_paths(prior_metric_paths, REPORT_EXTENSIONS)
+        prior_data = parse_published_reports(prior_files, year=prev_year)
+
+    comparator = YoYReportComparator(
+        current.aggregator,
+        prior_data,
+        curr_year=curr_year,
+        prev_year=prev_year,
+    )
+    current_overall = _plain_ta_config(comparator._curr_ta_config_summary())
+    current_a = _plain_ta_config(comparator._curr_ta_config_summary("A"))
+    current_b = _plain_ta_config(comparator._curr_ta_config_summary("B"))
+    if previous_batch:
+        previous_comparator = YoYReportComparator(
+            previous_batch.aggregator,
+            PriorYearData(year=prev_year),
+            curr_year=prev_year,
+            prev_year="",
+        )
+        previous_overall = _plain_ta_config(previous_comparator._curr_ta_config_summary())
+        previous_a = _plain_ta_config(previous_comparator._curr_ta_config_summary("A"))
+        previous_b = _plain_ta_config(previous_comparator._curr_ta_config_summary("B"))
+    else:
+        previous_overall = _plain_ta_config(prior_data.ta_config)
+        previous_a = _plain_ta_config(prior_data.ta_config_a)
+        previous_b = _plain_ta_config(prior_data.ta_config_b)
+
+    markdown_sections = [
+        f"### {curr_year} TA人员配置P50（0值已trim）",
+        _ta_config_markdown(current_overall, include_samples=True),
+    ]
+    if previous_overall:
+        markdown_sections.extend(
+            [
+                (
+                    f"\n### {prev_year} TA人员配置P50（0值已trim）"
+                    if previous_batch
+                    else f"\n### {prev_year} 可读取的TA人员配置值（局部口径）"
+                ),
+                _ta_config_markdown(previous_overall, include_samples=previous_batch is not None),
+            ]
+        )
+        if not previous_batch:
+            markdown_sections.append(
+                "\n> 上年度最终口径表的TA配置页为嵌入图表，目前仅可读取 COE function 和 TA BP；不用于完整人员配置年度同比。"
+            )
+
+    return {
+        "metric_definitions": {
+            "TA_FTE": "内部TA人员数量（人）",
+            "TA_第三方": "外部第三方招聘人员数量（包括RPO，人）",
+        },
+        "current_year": {
+            "year": curr_year,
+            "coverage": "问卷可解析的TA人员配置数据；统计口径为正值样本P50，0值trim。",
+            "overall": current_overall,
+            "a_class": current_a,
+            "b_class": current_b,
+        },
+        "previous_year": {
+            "year": prev_year,
+            "metric_files": prior_files,
+            "coverage": (
+                "上年度问卷可解析的TA人员配置数据；统计口径为正值样本P50，0值trim。"
+                if previous_batch
+                else (
+                    "仅最终口径表中嵌入图表可识别的 COE function 与 TA BP 标注值；"
+                    "数据不完整，不建议与当年全量配置直接同比。"
+                    if previous_overall
+                    else (
+                        "已提供的上年度最终口径表不包含TA人员配置页或可识别配置值，"
+                        "无法从该文件提取上年度人员配置。"
+                        if prior_files
+                        else "未提供上年度问卷或最终口径表，未提取上年度人员配置。"
+                    )
+                )
+            ),
+            "source_mode": (
+                "questionnaire"
+                if previous_batch
+                else ("final_metric_file" if prior_files else "not_provided")
+            ),
+            "questionnaire_meta": _batch_meta(previous_batch) if previous_batch else None,
+            "overall": previous_overall,
+            "a_class": previous_a,
+            "b_class": previous_b,
+        },
+        "table_markdown": "\n\n".join(markdown_sections),
         "current": _batch_meta(current),
     }
 
