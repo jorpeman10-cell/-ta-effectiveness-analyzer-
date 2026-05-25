@@ -81,6 +81,26 @@ def ta_compare_questionnaire_years(
 
 
 @mcp.tool()
+def ta_compare_same_company_channels(
+    current_questionnaire_paths: list[str],
+    previous_questionnaire_paths: list[str],
+    curr_year: str = "2025",
+    prev_year: str = "2024",
+) -> dict:
+    """Compare recruiting channel usage for companies identified in both years.
+
+    Returns company-level raw records plus P25/P50/P75 for first-level
+    channels and external-channel detail, with channel-total closure checks.
+    """
+    return service.compare_same_company_channels(
+        current_questionnaire_paths,
+        previous_questionnaire_paths,
+        curr_year=curr_year,
+        prev_year=prev_year,
+    )
+
+
+@mcp.tool()
 def ta_compare_with_prior_metrics(
     current_questionnaire_paths: list[str],
     prior_metric_paths: list[str],

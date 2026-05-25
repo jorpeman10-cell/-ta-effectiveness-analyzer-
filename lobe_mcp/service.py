@@ -147,6 +147,20 @@ def _batch_meta(batch: QuestionnaireBatch) -> dict[str, Any]:
     }
 
 
+def _json_records(dataframe) -> list[dict[str, Any]]:
+    """Convert DataFrame records to strict JSON-safe scalar values."""
+    records = []
+    for item in dataframe.to_dict(orient="records"):
+        clean = {}
+        for key, value in item.items():
+            try:
+                clean[key] = None if value != value else value
+            except TypeError:
+                clean[key] = value
+        records.append(clean)
+    return records
+
+
 def generate_industry_report(
     questionnaire_paths: Iterable[str],
     include_survey_sections: bool = True,
@@ -226,6 +240,51 @@ def compare_questionnaire_years(
         "report_markdown": report,
         "comparison_table_markdown": comparator.export_comparison_table().to_markdown(index=False),
         "same_company_table_markdown": comparator.export_same_company_table().to_markdown(index=False),
+        "current": _batch_meta(current),
+        "previous": _batch_meta(previous),
+    }
+
+
+def compare_same_company_channels(
+    current_questionnaire_paths: Iterable[str],
+    previous_questionnaire_paths: Iterable[str],
+    curr_year: str = "2025",
+    prev_year: str = "2024",
+) -> dict[str, Any]:
+    """Compare channel usage for the same successfully matched companies in both years."""
+    current = _ingest_questionnaires(current_questionnaire_paths)
+    previous = _ingest_questionnaires(previous_questionnaire_paths)
+    comparator = YoYComparator(
+        current.aggregator,
+        previous.aggregator,
+        curr_year=curr_year,
+        prev_year=prev_year,
+    )
+    pairs = comparator._same_company_pairs()
+    raw = comparator.export_same_company_channel_raw()
+    quantiles = comparator.export_same_company_channel_quantiles()
+    closed_pairs = sum(
+        1
+        for _, rows in raw.groupby("配对标识")
+        if rows["年度"].nunique() == 2 and (rows["闭合状态"] == "闭合").all()
+    ) if not raw.empty else 0
+    return {
+        "analysis_scope": "仅使用两年均上传且成功匹配的同一批公司。",
+        "channel_definitions": {
+            "一级渠道": ["HR直招", "外部渠道", "内部渠道"],
+            "外部渠道": ["猎头", "内推", "主动投递", "校招", "RPO"],
+            "内部渠道": ["内部转岗"],
+            "占比口径": "一级渠道占比以公司内一级渠道合计为分母；外部细分占比以公司内外部渠道合计为分母。",
+        },
+        "matched_company_count": len(pairs),
+        "two_year_closed_company_count": int(closed_pairs),
+        "matched_companies": [
+            {"match_key": key, prev_year: prev_name, curr_year: curr_name}
+            for key, (curr_name, prev_name) in pairs.items()
+        ],
+        "report_markdown": comparator.export_same_company_channel_report(),
+        "raw_company_records": _json_records(raw),
+        "quantile_records": _json_records(quantiles),
         "current": _batch_meta(current),
         "previous": _batch_meta(previous),
     }

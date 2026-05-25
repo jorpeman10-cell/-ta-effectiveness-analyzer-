@@ -652,6 +652,146 @@ class YoYComparator:
 
         return pd.DataFrame(rows)
 
+    def export_same_company_channel_raw(self) -> pd.DataFrame:
+        """Export company-level channel use records for companies present in both years."""
+        pairs, curr_df, prev_df = self._same_company_frames()
+        if not pairs:
+            return pd.DataFrame()
+
+        pair_labels = {}
+        for key, (curr_name, prev_name) in pairs.items():
+            label = curr_name if curr_name == prev_name else f"{prev_name} -> {curr_name}"
+            pair_labels[(self.prev_year, prev_name)] = (key, label)
+            pair_labels[(self.curr_year, curr_name)] = (key, label)
+
+        rows = []
+        for year, frame in [(self.prev_year, prev_df), (self.curr_year, curr_df)]:
+            overall = frame[frame['层级'] == '公司整体']
+            for _, row in overall.iterrows():
+                company = row['公司']
+                pair_key, pair_label = pair_labels.get((year, company), ("", company))
+                hires = _safe(row.get('招聘总量', 0))
+                hr_n = _safe(row.get('HR直招', 0))
+                hh_n = _safe(row.get('猎头_人', 0))
+                ref_n = _safe(row.get('内推_人', 0))
+                rpo_n = _safe(row.get('RPO_人', 0))
+                apply_n = _safe(row.get('主动投递', 0))
+                campus_n = _safe(row.get('校招', 0))
+                internal_n = _safe(row.get('内部转岗', 0))
+                external_n = hh_n + ref_n + rpo_n + apply_n + campus_n
+                channel_total = hr_n + external_n + internal_n
+                if channel_total <= 0:
+                    continue
+                closure_diff = channel_total - hires if hires > 0 else np.nan
+                rows.append({
+                    '配对标识': pair_key,
+                    '配对公司': pair_label,
+                    '年度': year,
+                    '公司': company,
+                    '规模': row.get('规模'),
+                    '招聘总量': hires,
+                    '渠道合计': channel_total,
+                    '渠道与招聘总量差异': closure_diff,
+                    '闭合状态': '闭合' if pd.notna(closure_diff) and abs(closure_diff) <= 1 else '待核查',
+                    'HR直招_人': hr_n,
+                    '外部渠道_人': external_n,
+                    '内部渠道_人': internal_n,
+                    '猎头_人': hh_n,
+                    '内推_人': ref_n,
+                    '主动投递_人': apply_n,
+                    '校招_人': campus_n,
+                    'RPO_人': rpo_n,
+                    'HR直招_占一级渠道': hr_n / channel_total,
+                    '外部渠道_占一级渠道': external_n / channel_total,
+                    '内部渠道_占一级渠道': internal_n / channel_total,
+                    '猎头_占外部渠道': hh_n / external_n if external_n > 0 else np.nan,
+                    '内推_占外部渠道': ref_n / external_n if external_n > 0 else np.nan,
+                    '主动投递_占外部渠道': apply_n / external_n if external_n > 0 else np.nan,
+                    '校招_占外部渠道': campus_n / external_n if external_n > 0 else np.nan,
+                    'RPO_占外部渠道': rpo_n / external_n if external_n > 0 else np.nan,
+                })
+        return pd.DataFrame(rows)
+
+    def export_same_company_channel_quantiles(self) -> pd.DataFrame:
+        """Export P25/P50/P75 channel-use distribution for paired companies."""
+        raw = self.export_same_company_channel_raw()
+        if raw.empty:
+            return pd.DataFrame()
+        dimensions = {
+            '一级渠道': {
+                'HR直招': 'HR直招_占一级渠道',
+                '外部渠道': '外部渠道_占一级渠道',
+                '内部渠道': '内部渠道_占一级渠道',
+            },
+            '外部渠道细分（占外部渠道）': {
+                '猎头': '猎头_占外部渠道',
+                '内推': '内推_占外部渠道',
+                '主动投递': '主动投递_占外部渠道',
+                '校招': '校招_占外部渠道',
+                'RPO': 'RPO_占外部渠道',
+            },
+        }
+        rows = []
+        closed_keys = {
+            pair_key
+            for pair_key, sub in raw.groupby('配对标识')
+            if sub['年度'].nunique() == 2 and (sub['闭合状态'] == '闭合').all()
+        }
+        scopes = {
+            '全部匹配公司': raw,
+            '双年闭合公司': raw[raw['配对标识'].isin(closed_keys)],
+        }
+        for scope, source in scopes.items():
+            for layer, metrics in dimensions.items():
+                for channel, column in metrics.items():
+                    for year in [self.prev_year, self.curr_year]:
+                        values = pd.to_numeric(source[source['年度'] == year][column], errors='coerce').dropna()
+                        rows.append({
+                            '样本口径': scope,
+                            '分析层级': layer,
+                            '渠道': channel,
+                            '年度': year,
+                            '有效样本': int(len(values)),
+                            'P25': values.quantile(0.25) if len(values) else np.nan,
+                            'P50': values.quantile(0.50) if len(values) else np.nan,
+                            'P75': values.quantile(0.75) if len(values) else np.nan,
+                        })
+        return pd.DataFrame(rows)
+
+    def export_same_company_channel_report(self) -> str:
+        """Return compact markdown for paired-company channel-use analysis."""
+        pairs = self._same_company_pairs()
+        raw = self.export_same_company_channel_raw()
+        quantiles = self.export_same_company_channel_quantiles()
+        if raw.empty:
+            return "未找到两年均成功识别的同公司渠道数据。"
+
+        lines = [
+            "## 两年同公司招聘渠道使用分析",
+            f"\n- 同公司匹配样本: **{len(pairs)}家**",
+            "- 一级渠道口径: HR直招、外部渠道、内部渠道",
+            "- 外部渠道口径: 猎头 + 内推 + 主动投递 + 校招 + RPO",
+            "- 内部渠道口径: 内部转岗",
+            "\n> 渠道占比以每家公司一级渠道合计为分母；渠道合计与招聘总量的差异另行输出用于核查。",
+            "> 趋势解读优先使用“双年闭合公司”，即两年渠道合计与招聘总量差异绝对值均不超过1人的配对公司。",
+        ]
+        for scope in quantiles['样本口径'].unique():
+            for layer in quantiles['分析层级'].unique():
+                subset = quantiles[
+                    (quantiles['样本口径'] == scope) & (quantiles['分析层级'] == layer)
+                ].copy()
+                for column in ['P25', 'P50', 'P75']:
+                    subset[column] = subset[column].apply(
+                        lambda value: f"{value:.2%}" if pd.notna(value) else "N/A"
+                    )
+                lines.append(f"\n### {scope} - {layer} P25/P50/P75\n")
+                lines.append(_df_to_markdown_table(subset.drop(columns=['样本口径', '分析层级'])))
+
+        closure = raw[['配对公司', '年度', '招聘总量', '渠道合计', '渠道与招聘总量差异', '闭合状态']].copy()
+        lines.append("\n### 渠道与招聘总量闭合核查\n")
+        lines.append(_df_to_markdown_table(closure))
+        return "\n".join(lines)
+
     # ==================== 计算辅助方法 ====================
 
     def _calc_func_volume_p50(self, df, func, scale=None):
